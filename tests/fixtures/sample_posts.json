@@ -1,0 +1,72 @@
+[
+  {
+    "author_handle": "BillAckman",
+    "text": "$FNMA and $FMCC remain massively undervalued. The GSEs are trading at a fraction of book value. Treasury's net worth sweep should be reversed. Conservatorship release is a matter of when, not if. We maintain our position.",
+    "expected_direction": "LONG",
+    "expected_tickers": ["FNMA", "FMCC"],
+    "notes": "High-conviction activist LONG — Ackman's signature GSE thesis"
+  },
+  {
+    "author_handle": "CitronResearch",
+    "text": "Short $NKLA. Our research reveals the Nikola truck was rolling downhill in the promo video, not driving under its own power. This is a textbook fraud. Target price: $0.",
+    "expected_direction": "SHORT",
+    "expected_tickers": ["NKLA"],
+    "notes": "High-conviction SHORT — short seller report"
+  },
+  {
+    "author_handle": "CathieDWood",
+    "text": "TSLA is the most important stock of the decade. We believe autonomous driving alone justifies a $2T market cap. ARK continues to add to our position on pullbacks. Innovation solves everything.",
+    "expected_direction": "LONG",
+    "expected_tickers": ["TSLA"],
+    "notes": "Growth investor LONG with price target"
+  },
+  {
+    "author_handle": "Nouriel",
+    "text": "The Fed is making a colossal policy mistake. Inflation is sticky, growth is slowing, and the yield curve remains deeply inverted. We are heading for a hard landing. Risk assets face severe headwinds.",
+    "expected_direction": "NEUTRAL",
+    "expected_tickers": [],
+    "notes": "Macro commentary — no specific ticker, should score NEUTRAL"
+  },
+  {
+    "author_handle": "michaeljburry",
+    "text": "$AAPL",
+    "expected_direction": "AMBIGUOUS",
+    "expected_tickers": ["AAPL"],
+    "notes": "Burry-style cryptic one-ticker post — ambiguous direction"
+  },
+  {
+    "author_handle": "DanIvesWedbush",
+    "text": "Upgrading NVDA to Outperform with a $250 price target. The AI infrastructure buildout is only in the 2nd inning. Jensen's vision is playing out exactly as we predicted. Massive upside ahead.",
+    "expected_direction": "LONG",
+    "expected_tickers": ["NVDA"],
+    "notes": "Analyst upgrade with price target"
+  },
+  {
+    "author_handle": "MuddyWatersRsrch",
+    "text": "We are short $CLOV. The company's Medicare Advantage claims data shows alarming patterns consistent with upcoding. Management's response to our questions has been evasive. Full report at muddy waters research dot com.",
+    "expected_direction": "SHORT",
+    "expected_tickers": ["CLOV"],
+    "notes": "Short seller with specific fraud allegation"
+  },
+  {
+    "author_handle": "chamath",
+    "text": "Just had an amazing conversation about the future of AI with the team. The pace of innovation is breathtaking. We're living through the most important technological shift since the internet. Buckle up.",
+    "expected_direction": "NEUTRAL",
+    "expected_tickers": [],
+    "notes": "General commentary without specific stock mention"
+  },
+  {
+    "author_handle": "BillAckman",
+    "text": "We have taken a significant new position in $CMG. Chipotle's unit economics are best-in-class, management is executing flawlessly on the new menu rollout, and same-store sales are accelerating. This is a compounder.",
+    "expected_direction": "LONG",
+    "expected_tickers": ["CMG"],
+    "notes": "High-conviction LONG with specific thesis"
+  },
+  {
+    "author_handle": "WallStCynic",
+    "text": "COIN is a casino masquerading as a financial institution. Revenue is 90% dependent on retail crypto trading volume which is in secular decline. Short with a 12-month horizon.",
+    "expected_direction": "SHORT",
+    "expected_tickers": ["COIN"],
+    "notes": "Short seller with specific bearish thesis and time horizon"
+  }
+]
