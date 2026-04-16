@@ -1,0 +1,32 @@
+# Environment and secrets
+.env
+
+# Twitter credentials (equivalent to a password — never commit)
+data/twitter_cookies.json
+
+# Database
+data/signals.db
+
+# Logs
+logs/
+
+# Python virtual environment
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

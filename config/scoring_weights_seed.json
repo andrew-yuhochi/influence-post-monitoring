@@ -1,0 +1,30 @@
+{
+  "description": "Initial scoring component weights for composite score computation. Loaded into scoring_weights DB table at first run. Weights must sum to 1.0.",
+  "weights": [
+    {
+      "component": "credibility",
+      "weight": 0.30,
+      "description": "Poster credibility from investor_profiles.credibility_score (manual seed, auto-updated)"
+    },
+    {
+      "component": "conviction",
+      "weight": 0.25,
+      "description": "Conviction level from Claude scoring (PostScore.conviction_level normalized to [0,1])"
+    },
+    {
+      "component": "argument",
+      "weight": 0.20,
+      "description": "Argument quality from Claude scoring (HIGH=1.0, MEDIUM=0.6, LOW=0.2)"
+    },
+    {
+      "component": "engagement",
+      "weight": 0.15,
+      "description": "Post engagement normalized by rolling max: (view_count + 5*repost_count) / max_observed_30d"
+    },
+    {
+      "component": "historical",
+      "weight": 0.10,
+      "description": "Investor rolling 30-day directional accuracy from investor_profiles.rolling_accuracy_30d"
+    }
+  ]
+}

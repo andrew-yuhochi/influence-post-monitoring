@@ -1,0 +1,155 @@
+[
+  {
+    "name": "Bill Ackman",
+    "x_handle": "BillAckman",
+    "source_type": "twitter",
+    "investor_type": "activist",
+    "credibility_score": 8.5,
+    "is_active": true,
+    "notes": "PoC origin catalyst — FNMA/FMCC tweet"
+  },
+  {
+    "name": "Chamath Palihapitiya",
+    "x_handle": "chamath",
+    "source_type": "twitter",
+    "investor_type": "growth",
+    "credibility_score": 7.0,
+    "is_active": true,
+    "notes": "Active daily; All-In Podcast"
+  },
+  {
+    "name": "Michael Burry",
+    "x_handle": "michaeljburry",
+    "source_type": "twitter",
+    "investor_type": "contrarian",
+    "credibility_score": 9.0,
+    "is_active": true,
+    "notes": "Infrequent but high-impact; deletes posts within hours"
+  },
+  {
+    "name": "Nouriel Roubini",
+    "x_handle": "Nouriel",
+    "source_type": "twitter",
+    "investor_type": "macro",
+    "credibility_score": 7.5,
+    "is_active": true,
+    "notes": "Active; macro + market calls"
+  },
+  {
+    "name": "Cathie Wood",
+    "x_handle": "CathieDWood",
+    "source_type": "twitter",
+    "investor_type": "growth",
+    "credibility_score": 6.5,
+    "is_active": true,
+    "notes": "Daily commentary; ARK Invest"
+  },
+  {
+    "name": "Mohamed El-Erian",
+    "x_handle": "elerianm",
+    "source_type": "twitter",
+    "investor_type": "macro",
+    "credibility_score": 7.5,
+    "is_active": true,
+    "notes": "Frequent; Fed policy, macro rates"
+  },
+  {
+    "name": "Jeff Gundlach",
+    "x_handle": "TruthGundlach",
+    "source_type": "twitter",
+    "investor_type": "macro",
+    "credibility_score": 8.0,
+    "is_active": true,
+    "notes": "Active; rates + credit"
+  },
+  {
+    "name": "Dan Ives",
+    "x_handle": "DanIvesWedbush",
+    "source_type": "twitter",
+    "investor_type": "analyst",
+    "credibility_score": 7.0,
+    "is_active": true,
+    "notes": "Moves tech stocks; upgrade/downgrade calls"
+  },
+  {
+    "name": "Citron Research",
+    "x_handle": "CitronResearch",
+    "source_type": "twitter",
+    "investor_type": "short_seller",
+    "credibility_score": 7.0,
+    "is_active": true,
+    "notes": "Reduced activity post-2024 SEC issues — verify on first run"
+  },
+  {
+    "name": "Howard Marks",
+    "x_handle": "HowardMarksBook",
+    "source_type": "twitter",
+    "investor_type": "value",
+    "credibility_score": 8.5,
+    "is_active": true,
+    "notes": "Memo-style; less frequent"
+  },
+  {
+    "name": "Aswath Damodaran",
+    "x_handle": "AswathDamodaran",
+    "source_type": "twitter",
+    "investor_type": "valuation",
+    "credibility_score": 8.0,
+    "is_active": true,
+    "notes": "Market-moving on earnings"
+  },
+  {
+    "name": "Cliff Asness",
+    "x_handle": "AQRCliff",
+    "source_type": "twitter",
+    "investor_type": "quant",
+    "credibility_score": 8.0,
+    "is_active": true,
+    "notes": "AQR; factor investing"
+  },
+  {
+    "name": "Carson Block",
+    "x_handle": "MuddyWatersRsrch",
+    "source_type": "twitter",
+    "investor_type": "short_seller",
+    "credibility_score": 8.5,
+    "is_active": true,
+    "notes": "Muddy Waters; high-impact short reports"
+  },
+  {
+    "name": "Jim Chanos",
+    "x_handle": "WallStCynic",
+    "source_type": "twitter",
+    "investor_type": "short_seller",
+    "credibility_score": 7.5,
+    "is_active": true,
+    "notes": "Kynikos closed 2023; still active on X"
+  },
+  {
+    "name": "Carl Icahn",
+    "x_handle": "Carl_C_Icahn",
+    "source_type": "twitter",
+    "investor_type": "activist",
+    "credibility_score": 8.0,
+    "is_active": true,
+    "notes": "Less active; high-impact when posts"
+  },
+  {
+    "name": "Whitney Tilson",
+    "x_handle": "whitneytilson",
+    "source_type": "twitter",
+    "investor_type": "value",
+    "credibility_score": 6.5,
+    "is_active": true,
+    "notes": "Daily newsletter; consistent output"
+  },
+  {
+    "name": "Quiver Quantitative",
+    "x_handle": "QuiverQuant",
+    "source_type": "twitter",
+    "investor_type": "data",
+    "credibility_score": 6.0,
+    "is_active": true,
+    "notes": "Congressional trade aggregator — separate plugin architecture needed; use NLP scoring in PoC as approximation"
+  }
+]
