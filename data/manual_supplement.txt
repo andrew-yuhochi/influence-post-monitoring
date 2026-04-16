@@ -1,0 +1,18 @@
+# Manual supplement — tickers monitored but not in S&P 500
+# OTC / pink sheets / small-cap names that appear in tracked investor posts.
+# One ticker per line. Lines starting with # are comments.
+
+# GSEs (Ackman / activist thesis)
+FNMA
+FMCC
+
+# Meme / high-profile names sometimes off major indices
+GME
+AMC
+BBBY
+
+# Short-seller targets (Hindenburg, Citron, Muddy Waters)
+NKLA
+RIDE
+CLOV
+HYMC
