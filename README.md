@@ -14,7 +14,7 @@ This system monitors 17 curated investor/analyst accounts on X (Twitter), extrac
 
 ## Setup
 
-See `docs/pocs/influence-post-monitoring/` for full project documentation (PRD, TDD, data sources, task breakdown).
+See `docs/influence-post-monitoring/poc/` for full project documentation (PRD, TDD, data sources, task breakdown).
 
 ### Quick Start
 

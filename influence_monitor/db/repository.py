@@ -447,6 +447,72 @@ class DatabaseRepository:
         rows = await cursor.fetchall()
         return {row["component"]: row["weight"] for row in rows}
 
+    # ------------------------------------------------------------------
+    # Index membership
+    # ------------------------------------------------------------------
+
+    async def get_index_membership(self, ticker: str) -> dict[str, Any] | None:
+        """Look up cached index membership for a ticker."""
+        cursor = await self.conn.execute(
+            "SELECT ticker, index_tier, market_cap_b, last_updated "
+            "FROM index_membership WHERE ticker = ?",
+            (ticker.upper(),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_index_membership(
+        self,
+        ticker: str,
+        index_tier: str,
+        market_cap_b: float | None = None,
+    ) -> None:
+        """Insert or update a single index membership entry."""
+        await self.conn.execute(
+            """INSERT INTO index_membership (ticker, index_tier, market_cap_b, last_updated)
+               VALUES (?, ?, ?, DATE('now'))
+               ON CONFLICT(ticker) DO UPDATE SET
+                   index_tier = excluded.index_tier,
+                   market_cap_b = excluded.market_cap_b,
+                   last_updated = excluded.last_updated""",
+            (ticker.upper(), index_tier, market_cap_b),
+        )
+        await self.conn.commit()
+
+    async def bulk_upsert_index_membership_if_stale(
+        self,
+        entries: list[tuple[str, str]],
+        ttl_days: int = 7,
+    ) -> int:
+        """Bulk upsert index membership, skipping entries still fresh.
+
+        Each entry is ``(ticker, index_tier)``.  New tickers are always
+        inserted; existing tickers are only updated when their
+        ``last_updated`` is older than *ttl_days*.
+        """
+        await self.conn.executemany(
+            """INSERT INTO index_membership (ticker, index_tier, last_updated)
+               VALUES (?, ?, DATE('now'))
+               ON CONFLICT(ticker) DO UPDATE SET
+                   index_tier = excluded.index_tier,
+                   last_updated = excluded.last_updated
+               WHERE julianday('now') - julianday(index_membership.last_updated) >= ?""",
+            [(ticker.upper(), tier, ttl_days) for ticker, tier in entries],
+        )
+        await self.conn.commit()
+        return len(entries)
+
+    async def get_stale_index_entries(self, days: int = 7) -> list[dict[str, Any]]:
+        """Return all index_membership rows older than *days*."""
+        cursor = await self.conn.execute(
+            """SELECT ticker, index_tier, market_cap_b, last_updated
+               FROM index_membership
+               WHERE julianday('now') - julianday(last_updated) >= ?""",
+            (days,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
 
 # ------------------------------------------------------------------
 # CLI entry point: python -m influence_monitor.db.repository --init
