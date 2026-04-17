@@ -291,6 +291,33 @@ class DatabaseRepository:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_morning_watchlist(
+        self, signal_date: date, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return ranked signals for the morning watchlist email.
+
+        Filters to signals with ``morning_rank IS NOT NULL`` and orders
+        by ``morning_rank ASC``.  Joins post text and investor profile
+        so the renderer does not need additional queries.
+        """
+        cursor = await self.conn.execute(
+            """SELECT s.*, p.text AS post_text, p.deleted AS post_deleted,
+                      p.posted_at,
+                      ip.name AS investor_name,
+                      ip.x_handle, ip.credibility_score,
+                      ip.rolling_accuracy_30d, ip.total_calls, ip.total_hits
+               FROM signals s
+               JOIN posts p ON s.post_id = p.id
+               JOIN investor_profiles ip ON s.investor_id = ip.id
+               WHERE s.signal_date = ?
+                 AND s.tenant_id = ?
+                 AND s.morning_rank IS NOT NULL
+               ORDER BY s.morning_rank ASC""",
+            (signal_date.isoformat(), tenant_id),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
     async def update_signal_prices(
         self,
         signal_id: int,

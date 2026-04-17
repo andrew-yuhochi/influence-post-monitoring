@@ -1,0 +1,9 @@
+INFLUENCE MONITOR                          {date_long}
+Morning Watchlist                          07:00 AM ET
+─────────────────────────────────────────────────────────────
+
+No significant overnight signals detected from the monitored watchlist.
+
+Monitored {accounts_monitored} accounts. No posts met the signal threshold.
+
+Next email: Evening Scorecard at market close (no watchlist to score today).

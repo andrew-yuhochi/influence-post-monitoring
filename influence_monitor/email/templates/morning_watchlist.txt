@@ -1,0 +1,12 @@
+INFLUENCE MONITOR                          {date_long}
+Morning Watchlist                          07:00 AM ET
+─────────────────────────────────────────────────────────────
+{headline_stats}
+
+
+{signal_cards}
+
+─────────────────────────────────────────────────────────────
+Signals sourced from {accounts_monitored} monitored accounts on X/Twitter.
+All signals from overnight window (4 PM ET yesterday – 6:30 AM ET today).
+Scorecard email at ~5:00 PM ET today.{footer_note}
