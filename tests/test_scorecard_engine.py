@@ -339,6 +339,169 @@ class TestRunEvening:
 
 
 # ----------------------------------------------------------------------
+# Backfill tests
+# ----------------------------------------------------------------------
+
+
+def _backfill_signal(
+    signal_id: int = 1,
+    ticker: str = "FNMA",
+    signal_date: str = "2026-04-08",  # 5 trading days before Apr 15
+    open_price: float = 10.0,
+) -> dict[str, Any]:
+    return {
+        "id": signal_id,
+        "ticker": ticker,
+        "signal_date": signal_date,
+        "open_price": open_price,
+    }
+
+
+def _make_backfill_engine(
+    pending_5d: list | None = None,
+    pending_10d: list | None = None,
+    pending_30d: list | None = None,
+    ohlcv_map: dict | None = None,
+) -> tuple[ScorecardEngine, MagicMock]:
+    """Build a ScorecardEngine wired for backfill tests."""
+    from influence_monitor.calendar import HolidayCalendar
+
+    market_client = MagicMock()
+    repo = AsyncMock()
+
+    def _pending(column, cutoff_date, tenant_id=1):
+        if column == "return_5d":
+            return pending_5d or []
+        if column == "return_10d":
+            return pending_10d or []
+        if column == "return_30d":
+            return pending_30d or []
+        return []
+
+    repo.get_signals_pending_backfill.side_effect = _pending
+    repo.update_signal_horizon_return.return_value = None
+
+    if ohlcv_map is not None:
+        def _fetch(ticker, target_date):
+            if ticker in ohlcv_map:
+                return ohlcv_map[ticker]
+            from influence_monitor.market_data.base import DataUnavailableError
+            raise DataUnavailableError(f"no data for {ticker}")
+        market_client.fetch_ohlcv.side_effect = _fetch
+    else:
+        market_client.fetch_ohlcv.return_value = _ohlcv()
+
+    calendar = HolidayCalendar(years=range(2026, 2027))
+    engine = ScorecardEngine(market_client, repo, _settings(), calendar=calendar)
+    return engine, repo
+
+
+class TestBackfillReturns:
+    @pytest.mark.asyncio
+    async def test_signal_6_trading_days_old_gets_5d_return(self) -> None:
+        """Signal from 6 trading days ago (> 5) has return_5d populated."""
+        # Apr 8 is 5 trading days before Apr 15 (Wed Apr 8, 9, 10, 11(skip wknd), 14, 15)
+        # Actually: Apr 8 → Apr 9 → Apr 10 → Apr 13 → Apr 14 → Apr 15 = 5 td
+        # So Apr 7 is 6 trading days before Apr 15 → qualifies
+        sig = _backfill_signal(signal_date="2026-04-07")
+        engine, repo = _make_backfill_engine(
+            pending_5d=[sig],
+            ohlcv_map={"FNMA": _ohlcv(open_=10.0, close=10.5)},
+        )
+
+        with _patch_yf():
+            result = await engine.backfill_returns(_TODAY)
+
+        assert result["updated"] >= 1
+        repo.update_signal_horizon_return.assert_called()
+        call_args = repo.update_signal_horizon_return.call_args_list[0]
+        assert call_args.args[1] == "return_5d"
+        assert call_args.args[2] == pytest.approx(5.0, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_signal_too_recent_not_backfilled(self) -> None:
+        """Signal from 3 trading days ago is NOT in the 5d pending list — no update."""
+        engine, repo = _make_backfill_engine(
+            pending_5d=[],  # repo returns empty — signal is too recent
+        )
+
+        with _patch_yf():
+            result = await engine.backfill_returns(_TODAY)
+
+        assert result["updated"] == 0
+        repo.update_signal_horizon_return.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_signal_31_trading_days_old_gets_30d_return(self) -> None:
+        """Signal from 31 trading days ago has return_30d populated."""
+        sig = _backfill_signal(signal_date="2026-02-27", open_price=20.0)
+        engine, repo = _make_backfill_engine(
+            pending_30d=[sig],
+            ohlcv_map={"FNMA": _ohlcv(open_=20.0, close=21.0)},
+        )
+
+        with _patch_yf():
+            result = await engine.backfill_returns(_TODAY)
+
+        assert result["updated"] >= 1
+        call_args = repo.update_signal_horizon_return.call_args_list[0]
+        assert call_args.args[1] == "return_30d"
+        assert call_args.args[2] == pytest.approx(5.0, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_backfill_fetch_failure_counted_as_error(self) -> None:
+        """Price fetch failure increments errors, does not raise."""
+        from influence_monitor.market_data.base import DataUnavailableError
+
+        sig = _backfill_signal(signal_date="2026-04-07")
+        engine, repo = _make_backfill_engine(
+            pending_5d=[sig],
+            ohlcv_map={},  # FNMA not in map → raises DataUnavailableError
+        )
+
+        with _patch_yf():
+            result = await engine.backfill_returns(_TODAY)
+
+        assert result["errors"] == 1
+        assert result["updated"] == 0
+        repo.update_signal_horizon_return.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backfill_is_idempotent(self) -> None:
+        """Running backfill twice only updates signals that are still NULL."""
+        sig = _backfill_signal(signal_date="2026-04-07")
+        engine, repo = _make_backfill_engine(
+            pending_5d=[sig],
+            ohlcv_map={"FNMA": _ohlcv(close=10.5)},
+        )
+
+        with _patch_yf():
+            await engine.backfill_returns(_TODAY)
+            # Second run: repo returns empty list (already populated)
+            repo.get_signals_pending_backfill.side_effect = lambda *a, **kw: []
+            result2 = await engine.backfill_returns(_TODAY)
+
+        assert result2["updated"] == 0
+
+    @pytest.mark.asyncio
+    async def test_return_computed_correctly(self) -> None:
+        """return_5d = (close - open) / open * 100, rounded to 4dp."""
+        sig = _backfill_signal(signal_date="2026-04-07", open_price=7.13)
+        engine, repo = _make_backfill_engine(
+            pending_5d=[sig],
+            ohlcv_map={"FNMA": _ohlcv(open_=7.13, close=7.42)},
+        )
+
+        with _patch_yf():
+            await engine.backfill_returns(_TODAY)
+
+        call_args = repo.update_signal_horizon_return.call_args_list[0]
+        ret = call_args.args[2]
+        assert ret == round(ret, 4)
+        assert ret == pytest.approx((7.42 - 7.13) / 7.13 * 100, abs=0.001)
+
+
+# ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
 

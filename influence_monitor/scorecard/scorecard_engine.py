@@ -26,6 +26,7 @@ from typing import Any
 
 import yfinance as yf
 
+from influence_monitor.calendar import HolidayCalendar
 from influence_monitor.config import Settings
 from influence_monitor.db.repository import DatabaseRepository
 from influence_monitor.market_data.base import (
@@ -58,6 +59,13 @@ _SECTOR_ETF: dict[str, str] = {
 _AVG_VOLUME_LOOKBACK = "35d"  # gives ~30 trading days
 
 
+_BACKFILL_HORIZONS: list[tuple[int, str]] = [
+    (5,  "return_5d"),
+    (10, "return_10d"),
+    (30, "return_30d"),
+]
+
+
 class ScorecardEngine:
     """Compute returns, HIT/MISS, and update accuracy for a trading day.
 
@@ -72,10 +80,12 @@ class ScorecardEngine:
         market_client: MarketDataClient,
         repo: DatabaseRepository,
         settings: Settings,
+        calendar: HolidayCalendar | None = None,
     ) -> None:
         self._client = market_client
         self._repo = repo
         self._settings = settings
+        self._calendar = calendar or HolidayCalendar()
 
     async def run_evening(self, signal_date: date) -> dict[str, Any]:
         """Score the morning watchlist for *signal_date*.
@@ -311,6 +321,55 @@ class ScorecardEngine:
             total_calls=total_calls,
             total_hits=total_hits,
         )
+
+    # ------------------------------------------------------------------
+    # Multi-horizon return backfill
+    # ------------------------------------------------------------------
+
+    async def backfill_returns(self, as_of_date: date) -> dict[str, Any]:
+        """Populate 5/10/30-trading-day horizon returns for eligible signals.
+
+        For each horizon N, finds signals where return_Nd IS NULL and
+        signal_date is at least N trading days in the past.  Fetches the
+        close price on signal_date + N trading days and stores the return.
+
+        Idempotent — skips columns that are already populated.
+        """
+        total_updated = errors = 0
+
+        for n_days, column in _BACKFILL_HORIZONS:
+            cutoff = self._calendar.trading_days_before(as_of_date, n_days)
+            signals = await self._repo.get_signals_pending_backfill(
+                column, cutoff.isoformat()
+            )
+
+            for sig in signals:
+                signal_date = date.fromisoformat(sig["signal_date"])
+                target_date = self._calendar.trading_days_after(signal_date, n_days)
+                open_price = sig["open_price"]
+
+                try:
+                    ohlcv = self._client.fetch_ohlcv(sig["ticker"], target_date)
+                    close_price = ohlcv.get("close") if ohlcv else None
+                    if close_price and open_price:
+                        value = round(
+                            (close_price - open_price) / open_price * 100, 4
+                        )
+                        await self._repo.update_signal_horizon_return(
+                            sig["id"], column, value
+                        )
+                        total_updated += 1
+                except Exception as exc:
+                    logger.warning(
+                        "backfill %s for signal %d (%s) failed: %s",
+                        column, sig["id"], sig["ticker"], exc,
+                    )
+                    errors += 1
+
+        logger.info(
+            "backfill_returns(%s): updated=%d errors=%d", as_of_date, total_updated, errors
+        )
+        return {"updated": total_updated, "errors": errors}
 
     # ------------------------------------------------------------------
     # Daily summary

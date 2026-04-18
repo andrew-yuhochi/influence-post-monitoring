@@ -397,6 +397,51 @@ class DatabaseRepository:
         await self.conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
+    async def update_signal_morning_rank(
+        self,
+        signal_id: int,
+        morning_rank: int,
+        corroboration_count: int,
+        corroboration_bonus: float,
+    ) -> None:
+        """Set morning_rank and corroboration fields after aggregation."""
+        await self.conn.execute(
+            """UPDATE signals
+               SET morning_rank = ?,
+                   corroboration_count = ?,
+                   corroboration_bonus = ?,
+                   final_score = composite_score * ?
+               WHERE id = ?""",
+            (morning_rank, corroboration_count, corroboration_bonus, corroboration_bonus, signal_id),
+        )
+        await self.conn.commit()
+
+    async def update_signal_index_tier(
+        self, signal_id: int, index_tier: str
+    ) -> None:
+        """Set index_tier on a signal after index resolution."""
+        await self.conn.execute(
+            "UPDATE signals SET index_tier = ? WHERE id = ?",
+            (index_tier, signal_id),
+        )
+        await self.conn.commit()
+
+    async def get_signals_awaiting_open_price(
+        self, signal_date: date, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return morning-ranked signals that still need an open price."""
+        cursor = await self.conn.execute(
+            """SELECT id, ticker, investor_id
+               FROM signals
+               WHERE signal_date = ?
+                 AND tenant_id = ?
+                 AND morning_rank IS NOT NULL
+                 AND open_price IS NULL""",
+            (signal_date.isoformat(), tenant_id),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
     async def get_morning_watchlist(
         self, signal_date: date, tenant_id: int = 1
     ) -> list[dict[str, Any]]:
@@ -614,6 +659,48 @@ class DatabaseRepository:
         await self.conn.execute(
             f"UPDATE signals SET {', '.join(updates)} WHERE id = ?",
             values,
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Multi-horizon return backfill
+    # ------------------------------------------------------------------
+
+    async def get_signals_pending_backfill(
+        self, column: str, cutoff_date: str, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return signals where *column* IS NULL and signal_date <= cutoff_date.
+
+        *column* must be one of: return_5d, return_10d, return_30d.
+        Only signals with a stored open_price are returned (required for return computation).
+        """
+        _ALLOWED = {"return_5d", "return_10d", "return_30d"}
+        if column not in _ALLOWED:
+            raise ValueError(f"column must be one of {_ALLOWED}, got {column!r}")
+        rows = await self.conn.execute_fetchall(
+            f"""
+            SELECT id, ticker, signal_date, open_price
+            FROM signals
+            WHERE {column} IS NULL
+              AND open_price IS NOT NULL
+              AND signal_date <= ?
+              AND tenant_id = ?
+            ORDER BY signal_date ASC
+            """,
+            (cutoff_date, tenant_id),
+        )
+        return [dict(r) for r in rows]
+
+    async def update_signal_horizon_return(
+        self, signal_id: int, column: str, value: float
+    ) -> None:
+        """Set a single horizon return column on a signal (idempotent)."""
+        _ALLOWED = {"return_5d", "return_10d", "return_30d"}
+        if column not in _ALLOWED:
+            raise ValueError(f"column must be one of {_ALLOWED}, got {column!r}")
+        await self.conn.execute(
+            f"UPDATE signals SET {column} = ? WHERE id = ?",
+            (value, signal_id),
         )
         await self.conn.commit()
 

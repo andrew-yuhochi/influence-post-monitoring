@@ -6,7 +6,7 @@ Covers TASK-015 acceptance criteria:
 - run_morning: non-trading day skipped; IngestorError → failure email + no watchlist;
   unhandled exception → failure email; dry-run renders to stdout.
 - run_evening: non-trading day skipped; success → ok + scorecard; exception → failure email.
-- run_open_prices: non-trading day skipped; fetches open prices; handles errors gracefully.
+- trading_days_before: skips weekends and holidays counting backwards.
 """
 
 from __future__ import annotations
@@ -18,13 +18,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from influence_monitor.ingestion.base import IngestorError
-from influence_monitor.pipeline import (
+from influence_monitor.calendar import (
     HolidayCalendar,
-    PipelineOrchestrator,
     _easter,
     _nyse_holidays,
     _observe,
+)
+from influence_monitor.ingestion.base import IngestorError
+from influence_monitor.pipeline import (
+    PipelineOrchestrator,
     _overnight_since,
 )
 
@@ -144,6 +146,27 @@ class TestHolidayCalendar:
         # Monday Apr 13 + 5 trading days = Monday Apr 20
         result = self.cal.trading_days_after(date(2026, 4, 13), 5)
         assert result == date(2026, 4, 20)
+
+    def test_trading_days_before_skips_weekend(self) -> None:
+        # Monday Apr 20 → 1 trading day back = Friday Apr 17
+        result = self.cal.trading_days_before(date(2026, 4, 20), 1)
+        assert result == date(2026, 4, 17)
+
+    def test_trading_days_before_skips_holiday(self) -> None:
+        # Monday Apr 6 → 1 trading day back skips Good Friday (Apr 3) → Thu Apr 2
+        result = self.cal.trading_days_before(date(2026, 4, 6), 1)
+        assert result == date(2026, 4, 2)
+
+    def test_trading_days_before_five_days(self) -> None:
+        # Monday Apr 20 − 5 trading days = Monday Apr 13
+        result = self.cal.trading_days_before(date(2026, 4, 20), 5)
+        assert result == date(2026, 4, 13)
+
+    def test_trading_days_before_after_are_inverses(self) -> None:
+        start = date(2026, 4, 13)
+        forward = self.cal.trading_days_after(start, 7)
+        back = self.cal.trading_days_before(forward, 7)
+        assert back == start
 
 
 # ======================================================================
