@@ -148,11 +148,13 @@ class TwitterIngestor(SocialMediaSource):
         author_handle: str,
         since: datetime,
         max_count: int = 20,
+        max_pages: int = 1,
     ) -> list[RawPost]:
         """Fetch recent tweets from *author_handle* posted after *since*.
 
-        Resolves handle → numeric user_id via get_user_by_screen_name(),
-        then fetches up to *max_count* tweets and filters by *since*.
+        Resolves handle → numeric user_id via get_user_by_screen_name(), then
+        paginates through up to *max_pages* pages of *max_count* tweets each,
+        stopping early once all tweets on a page predate *since*.
         """
         await self._ensure_authenticated()
 
@@ -161,62 +163,81 @@ class TwitterIngestor(SocialMediaSource):
         follower_count: int | None = getattr(user, "followers_count", None)
         following_count: int | None = getattr(user, "following_count", None)
 
+        now = datetime.now(timezone.utc)
+        posts: list[RawPost] = []
+        seen_ids: set[str] = set()
+
         tweets = await self._client.get_user_tweets(
             user_id=user_id,
             tweet_type="Tweets",
             count=max_count,
         )
 
-        now = datetime.now(timezone.utc)
-        posts: list[RawPost] = []
+        for _page in range(max_pages):
+            page_had_newer = False
 
-        for tweet in tweets:
-            posted_at = _parse_created_at(tweet.created_at)
-            if posted_at <= since:
-                continue
+            for tweet in tweets:
+                posted_at = _parse_created_at(tweet.created_at)
+                if posted_at <= since:
+                    continue
 
-            # Detect thread context
-            in_reply_to = getattr(tweet, "in_reply_to", None)
-            is_thread = in_reply_to is not None and str(getattr(in_reply_to, "id", "")) != ""
-            thread_position: int | None = None
-            if is_thread and hasattr(tweet, "thread"):
-                thread = getattr(tweet, "thread", None)
-                if thread and isinstance(thread, list):
-                    for idx, t in enumerate(thread):
-                        if getattr(t, "id", None) == tweet.id:
-                            thread_position = idx + 1
-                            break
+                page_had_newer = True
+                tweet_id = str(tweet.id)
+                if tweet_id in seen_ids:
+                    continue
+                seen_ids.add(tweet_id)
 
-            # Quote tweet
-            quote = getattr(tweet, "quote", None)
-            quote_tweet_id = str(quote.id) if quote else None
+                # Detect thread context
+                in_reply_to = getattr(tweet, "in_reply_to", None)
+                is_thread = in_reply_to is not None and str(getattr(in_reply_to, "id", "")) != ""
+                thread_position: int | None = None
+                if is_thread and hasattr(tweet, "thread"):
+                    thread = getattr(tweet, "thread", None)
+                    if thread and isinstance(thread, list):
+                        for idx, t in enumerate(thread):
+                            if getattr(t, "id", None) == tweet.id:
+                                thread_position = idx + 1
+                                break
 
-            raw_post = RawPost(
-                source_type="twitter",
-                external_id=str(tweet.id),
-                author_handle=author_handle,
-                author_external_id=user_id,
-                text=tweet.full_text,
-                posted_at=posted_at,
-                fetched_at=now,
-                view_count=_safe_int(tweet.view_count),
-                repost_count=_safe_int(tweet.retweet_count),
-                reply_count=_safe_int(tweet.reply_count),
-                like_count=_safe_int(tweet.favorite_count),
-                bookmark_count=_safe_int(tweet.bookmark_count),
-                quote_tweet_id=quote_tweet_id,
-                is_thread=is_thread,
-                thread_position=thread_position,
-                hashtags=tweet.hashtags or [],
-                mentioned_users=_extract_mentioned_users(tweet),
-                url_links=_extract_url_links(tweet),
-                media_type=_extract_media_type(tweet),
-                language=tweet.lang or "en",
-                follower_count_at_post=follower_count,
-                following_count_at_post=following_count,
-                raw_payload=_tweet_to_raw_payload(tweet),
-            )
-            posts.append(raw_post)
+                # Quote tweet
+                quote = getattr(tweet, "quote", None)
+                quote_tweet_id = str(quote.id) if quote else None
+
+                raw_post = RawPost(
+                    source_type="twitter",
+                    external_id=tweet_id,
+                    author_handle=author_handle,
+                    author_external_id=user_id,
+                    text=tweet.full_text,
+                    posted_at=posted_at,
+                    fetched_at=now,
+                    view_count=_safe_int(tweet.view_count),
+                    repost_count=_safe_int(tweet.retweet_count),
+                    reply_count=_safe_int(tweet.reply_count),
+                    like_count=_safe_int(tweet.favorite_count),
+                    bookmark_count=_safe_int(tweet.bookmark_count),
+                    quote_tweet_id=quote_tweet_id,
+                    is_thread=is_thread,
+                    thread_position=thread_position,
+                    hashtags=tweet.hashtags or [],
+                    mentioned_users=_extract_mentioned_users(tweet),
+                    url_links=_extract_url_links(tweet),
+                    media_type=_extract_media_type(tweet),
+                    language=tweet.lang or "en",
+                    follower_count_at_post=follower_count,
+                    following_count_at_post=following_count,
+                    raw_payload=_tweet_to_raw_payload(tweet),
+                )
+                posts.append(raw_post)
+
+            # Stop paginating if this page had nothing newer than `since`
+            if not page_had_newer or _page + 1 >= max_pages:
+                break
+
+            try:
+                tweets = await tweets.next()
+            except Exception:
+                break
 
         logger.info(
             "Fetched %d posts from @%s (since %s)",
@@ -229,6 +250,7 @@ class TwitterIngestor(SocialMediaSource):
         handles: list[str],
         since: datetime,
         max_count: int = 20,
+        max_pages: int = 1,
     ) -> tuple[list[RawPost], int, int]:
         """Fetch posts from multiple accounts with per-account error handling.
 
@@ -243,7 +265,7 @@ class TwitterIngestor(SocialMediaSource):
 
         for handle in handles:
             try:
-                posts = await self.fetch_recent_posts(handle, since, max_count)
+                posts = await self.fetch_recent_posts(handle, since, max_count, max_pages)
                 all_posts.extend(posts)
                 success_count += 1
             except (BadRequest, Forbidden, NotFound, Unauthorized) as exc:

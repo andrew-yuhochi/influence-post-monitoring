@@ -114,21 +114,30 @@ class PipelineOrchestrator:
     # ------------------------------------------------------------------
 
     async def run_morning(
-        self, run_date: date, dry_run: bool = False
+        self,
+        run_date: date,
+        dry_run: bool = False,
+        since_override: datetime | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
         """Run the full morning watchlist pipeline for *run_date*.
+
+        *since_override*: if provided, use this datetime instead of the
+        default overnight window. Useful for historical backfill tests.
+        *max_pages*: number of pagination pages per account (default 1 = ~20
+        tweets). Increase for longer lookback windows.
 
         Returns a summary dict. On failure, sends an operational alert
         and returns a summary with ``status='failed'``.
 
         ``dry_run=True`` renders to stdout and skips DB writes + sending.
         """
-        if not self._calendar.is_trading_day(run_date):
+        if not self._calendar.is_trading_day(run_date) and since_override is None:
             logger.info("run_morning(%s): not a trading day — skipping", run_date)
             return {"status": "skipped", "reason": "non-trading day"}
 
         try:
-            return await self._run_morning_inner(run_date, dry_run)
+            return await self._run_morning_inner(run_date, dry_run, since_override, max_pages)
         except IngestorError as exc:
             msg = f"IngestorError: {exc}"
             logger.error("Morning pipeline IngestorError: %s", exc)
@@ -146,16 +155,20 @@ class PipelineOrchestrator:
             return {"status": "failed", "error": msg}
 
     async def _run_morning_inner(
-        self, run_date: date, dry_run: bool
+        self,
+        run_date: date,
+        dry_run: bool,
+        since_override: datetime | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        since = _overnight_since(run_date)
+        since = since_override if since_override is not None else _overnight_since(run_date)
         investors = await self._repo.get_active_investors()
         handles = [inv["x_handle"] for inv in investors if inv.get("x_handle")]
         investor_map = {inv["x_handle"]: inv for inv in investors}
 
         logger.info("Fetching posts from %d accounts since %s", len(handles), since)
         posts, success_count, _ = await self._ingestor.fetch_all_accounts(
-            handles, since=since
+            handles, since=since, max_pages=max_pages
         )
         logger.info("Fetched %d posts from %d accounts", len(posts), success_count)
 
@@ -518,7 +531,7 @@ def _signals_to_render_rows(
 # CLI entry point
 # ======================================================================
 
-async def _async_main(command: str, dry_run: bool) -> None:
+async def _async_main(command: str, dry_run: bool, since_str: str | None = None) -> None:
     import sys
 
     logging.basicConfig(
@@ -534,8 +547,20 @@ async def _async_main(command: str, dry_run: bool) -> None:
         orchestrator = await build_orchestrator(settings, repo)
         run_date = date.today()
 
+        since_override: datetime | None = None
+        max_pages = 1
+        if since_str:
+            since_override = datetime.fromisoformat(since_str).replace(tzinfo=timezone.utc)
+            # Estimate pages needed: ~20 tweets/page, ~5 tweets/day/account
+            days = (datetime.now(timezone.utc) - since_override).days
+            max_pages = max(1, min(days // 4, 15))  # cap at 15 pages
+            logger.info("Historical run: since=%s, max_pages=%d per account", since_str, max_pages)
+
         if command == "morning":
-            result = await orchestrator.run_morning(run_date, dry_run=dry_run)
+            result = await orchestrator.run_morning(
+                run_date, dry_run=dry_run,
+                since_override=since_override, max_pages=max_pages,
+            )
         elif command == "evening":
             result = await orchestrator.run_evening(run_date, dry_run=dry_run)
         elif command == "auth":
@@ -559,12 +584,19 @@ def main() -> None:
 
     args = sys.argv[1:]
     if not args:
-        print("Usage: python -m influence_monitor.pipeline [morning|evening|auth] [--dry-run]")
+        print("Usage: python -m influence_monitor.pipeline [morning|evening|auth] [--dry-run] [--since YYYY-MM-DD]")
         sys.exit(1)
 
     command = args[0]
     dry_run = "--dry-run" in args
-    asyncio.run(_async_main(command, dry_run))
+
+    since_str: str | None = None
+    if "--since" in args:
+        idx = args.index("--since")
+        if idx + 1 < len(args):
+            since_str = args[idx + 1]
+
+    asyncio.run(_async_main(command, dry_run, since_str))
 
 
 if __name__ == "__main__":

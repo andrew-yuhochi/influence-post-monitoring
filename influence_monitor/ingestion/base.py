@@ -70,6 +70,7 @@ class SocialMediaSource(ABC):
         author_handle: str,
         since: datetime,
         max_count: int = 20,
+        max_pages: int = 1,
     ) -> list[RawPost]:
         """Fetch recent posts from *author_handle* posted after *since*.
 

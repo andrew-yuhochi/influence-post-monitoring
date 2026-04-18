@@ -64,7 +64,7 @@
   },
   {
     "name": "Dan Ives",
-    "x_handle": "DanIvesWedbush",
+    "x_handle": "DanIves",
     "source_type": "twitter",
     "investor_type": "analyst",
     "credibility_score": 7.0,
@@ -100,7 +100,7 @@
   },
   {
     "name": "Cliff Asness",
-    "x_handle": "AQRCliff",
+    "x_handle": "CliffordAsness",
     "source_type": "twitter",
     "investor_type": "quant",
     "credibility_score": 8.0,
@@ -109,7 +109,7 @@
   },
   {
     "name": "Carson Block",
-    "x_handle": "MuddyWatersRsrch",
+    "x_handle": "MuddyWaters_",
     "source_type": "twitter",
     "investor_type": "short_seller",
     "credibility_score": 8.5,
