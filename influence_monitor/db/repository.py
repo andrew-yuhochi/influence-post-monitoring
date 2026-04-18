@@ -291,6 +291,112 @@ class DatabaseRepository:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_signals_for_scoring(
+        self, signal_date: date, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return morning-ranked signals that still need evening scoring.
+
+        Filters to signals where ``morning_rank IS NOT NULL`` (were in the
+        watchlist) and ``close_price IS NULL`` (not yet scored).  This
+        makes ``run_evening`` idempotent: re-running skips already-scored
+        signals.
+        """
+        cursor = await self.conn.execute(
+            """SELECT s.*, ip.name AS investor_name, ip.x_handle
+               FROM signals s
+               JOIN investor_profiles ip ON s.investor_id = ip.id
+               WHERE s.signal_date = ?
+                 AND s.tenant_id = ?
+                 AND s.morning_rank IS NOT NULL
+                 AND s.close_price IS NULL
+               ORDER BY s.morning_rank ASC""",
+            (signal_date.isoformat(), tenant_id),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def compute_investor_rolling_accuracy(
+        self, investor_id: int, days: int = 30
+    ) -> tuple[int, int]:
+        """Return (total_calls, hits) for an investor over the last *days*.
+
+        Only counts signals where ``is_hit IS NOT NULL`` (price data was
+        available).  Used to update ``rolling_accuracy_30d``.
+        """
+        cursor = await self.conn.execute(
+            """SELECT
+                 COUNT(*) AS total_calls,
+                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS hits
+               FROM signals
+               WHERE investor_id = ?
+                 AND is_hit IS NOT NULL
+                 AND signal_date >= DATE(?, ?)""",
+            (investor_id, "now", f"-{days} days"),
+        )
+        row = await cursor.fetchone()
+        total = int(row["total_calls"]) if row and row["total_calls"] else 0
+        hits = int(row["hits"]) if row and row["hits"] else 0
+        return total, hits
+
+    async def get_investor_lifetime_stats(
+        self, investor_id: int
+    ) -> tuple[int, int]:
+        """Return lifetime (total_calls, total_hits) for an investor."""
+        cursor = await self.conn.execute(
+            """SELECT
+                 COUNT(*) AS total_calls,
+                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS hits
+               FROM signals
+               WHERE investor_id = ?
+                 AND is_hit IS NOT NULL""",
+            (investor_id,),
+        )
+        row = await cursor.fetchone()
+        total = int(row["total_calls"]) if row and row["total_calls"] else 0
+        hits = int(row["hits"]) if row and row["hits"] else 0
+        return total, hits
+
+    async def upsert_daily_summary(self, **kwargs: Any) -> int:
+        """Insert or update a daily pipeline run summary.
+
+        Idempotent: checks for an existing row with the same
+        ``(tenant_id, summary_date, run_type)`` and updates it if found,
+        inserts a new row otherwise.
+        """
+        tenant_id = kwargs.get("tenant_id", 1)
+        summary_date = kwargs.get("summary_date")
+        run_type = kwargs.get("run_type")
+
+        cursor = await self.conn.execute(
+            "SELECT id FROM daily_summaries "
+            "WHERE tenant_id = ? AND summary_date = ? AND run_type = ?",
+            (tenant_id, summary_date, run_type),
+        )
+        existing = await cursor.fetchone()
+
+        if existing:
+            row_id = existing["id"]
+            update_cols = [c for c in kwargs if c not in ("tenant_id", "summary_date", "run_type")]
+            set_clause = ", ".join(f"{c} = ?" for c in update_cols)
+            values = [kwargs[c] for c in update_cols] + [row_id]
+            await self.conn.execute(
+                f"UPDATE daily_summaries SET {set_clause} WHERE id = ?",
+                values,
+            )
+            await self.conn.commit()
+            return row_id
+
+        columns = list(kwargs.keys())
+        placeholders = ", ".join("?" for _ in columns)
+        col_names = ", ".join(columns)
+        values_list = list(kwargs.values())
+        cursor = await self.conn.execute(
+            f"INSERT INTO daily_summaries ({col_names}) VALUES ({placeholders})",
+            values_list,
+        )
+        await self.conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
     async def get_morning_watchlist(
         self, signal_date: date, tenant_id: int = 1
     ) -> list[dict[str, Any]]:
