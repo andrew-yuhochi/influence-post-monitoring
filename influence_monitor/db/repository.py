@@ -318,6 +318,121 @@ class DatabaseRepository:
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_evening_scorecard_signals(
+        self, signal_date: date, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return morning-ranked signals for the evening scorecard.
+
+        Returns the same set as ``get_morning_watchlist`` but is named
+        separately because the caller's intent is post-market scoring
+        (``return_pct``, ``is_hit``, price columns are populated by this
+        point in the pipeline).  Includes investor name and handle for
+        the track record attribution row.
+        """
+        cursor = await self.conn.execute(
+            """SELECT s.*, p.text AS post_text, p.deleted AS post_deleted,
+                      p.posted_at,
+                      ip.name AS investor_name,
+                      ip.x_handle, ip.credibility_score,
+                      ip.rolling_accuracy_30d, ip.total_calls, ip.total_hits
+               FROM signals s
+               JOIN posts p ON s.post_id = p.id
+               JOIN investor_profiles ip ON s.investor_id = ip.id
+               WHERE s.signal_date = ?
+                 AND s.tenant_id = ?
+                 AND s.morning_rank IS NOT NULL
+               ORDER BY s.morning_rank ASC""",
+            (signal_date.isoformat(), tenant_id),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_running_stats(self, tenant_id: int = 1) -> dict[str, Any]:
+        """Aggregate track record stats across all scored signals.
+
+        Returns a dict with keys: ``total_scored``, ``total_hits``,
+        ``avg_gain_correct``, ``avg_loss_incorrect``,
+        ``corroborated_total``, ``corroborated_hits``.
+
+        Adjusted return used for gain/loss:
+        ``return_pct`` for LONG, ``-return_pct`` for SHORT.
+        """
+        cursor = await self.conn.execute(
+            """SELECT
+                 COUNT(*) AS total_scored,
+                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS total_hits,
+                 AVG(CASE
+                       WHEN is_hit = 1 AND direction = 'LONG' THEN return_pct
+                       WHEN is_hit = 1 AND direction = 'SHORT' THEN -return_pct
+                       ELSE NULL
+                     END) AS avg_gain_correct,
+                 AVG(CASE
+                       WHEN is_hit = 0 AND direction = 'LONG' THEN return_pct
+                       WHEN is_hit = 0 AND direction = 'SHORT' THEN -return_pct
+                       ELSE NULL
+                     END) AS avg_loss_incorrect,
+                 SUM(CASE WHEN corroboration_count >= 2 THEN 1 ELSE 0 END)
+                     AS corroborated_total,
+                 SUM(CASE WHEN corroboration_count >= 2 AND is_hit = 1 THEN 1 ELSE 0 END)
+                     AS corroborated_hits
+               FROM signals
+               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else {}
+
+    async def get_trading_days_scored(self, tenant_id: int = 1) -> int:
+        """Count distinct trading days that have at least one scored signal."""
+        cursor = await self.conn.execute(
+            """SELECT COUNT(DISTINCT signal_date) AS day_count
+               FROM signals
+               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["day_count"]) if row and row["day_count"] else 0
+
+    async def get_first_scored_date(self, tenant_id: int = 1) -> date | None:
+        """Return the earliest signal_date that has a scored signal."""
+        cursor = await self.conn.execute(
+            """SELECT MIN(signal_date) AS first_date
+               FROM signals
+               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        if row and row["first_date"]:
+            return date.fromisoformat(row["first_date"])
+        return None
+
+    async def get_top_performer_month(
+        self, tenant_id: int = 1, min_calls: int = 3
+    ) -> dict[str, Any] | None:
+        """Return the investor with the highest hit rate in the last 30 days.
+
+        Only considers investors with at least *min_calls* scored signals
+        in the window.
+        """
+        cursor = await self.conn.execute(
+            """SELECT ip.name AS investor_name,
+                      ip.x_handle,
+                      COUNT(s.id) AS calls,
+                      SUM(CASE WHEN s.is_hit = 1 THEN 1 ELSE 0 END) AS hits
+               FROM signals s
+               JOIN investor_profiles ip ON s.investor_id = ip.id
+               WHERE s.is_hit IS NOT NULL
+                 AND s.tenant_id = ?
+                 AND s.signal_date >= DATE('now', '-30 days')
+               GROUP BY s.investor_id
+               HAVING calls >= ?
+               ORDER BY CAST(hits AS REAL) / calls DESC
+               LIMIT 1""",
+            (tenant_id, min_calls),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def update_signal_prices(
         self,
         signal_id: int,
