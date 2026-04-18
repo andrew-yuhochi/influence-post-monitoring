@@ -298,7 +298,7 @@ class PipelineOrchestrator:
             return {"status": "dry_run", "signals": len(ranked)}
 
         email = await self._morning_renderer.render(
-            run_date, self._repo, accounts_monitored=success_count
+            run_date, self._repo, accounts_monitored=len(handles)
         )
         await self._email_provider.send(
             to=self._settings.recipient_email,
