@@ -85,9 +85,13 @@ class ClaudeHaikuClient(LLMClient):
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
             raw_response = response.content[0].text
+            # Strip markdown code fences if model wraps JSON
+            stripped = raw_response.strip()
+            if stripped.startswith("```"):
+                stripped = stripped.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
             # Parse and validate
-            score = PostScore.model_validate_json(raw_response)
+            score = PostScore.model_validate_json(stripped)
             return score
 
         except anthropic.APIError as exc:

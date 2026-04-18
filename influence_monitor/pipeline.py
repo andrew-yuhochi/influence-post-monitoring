@@ -434,13 +434,14 @@ class PipelineOrchestrator:
 async def build_orchestrator(settings: Settings, repo: DatabaseRepository) -> PipelineOrchestrator:
     """Assemble a PipelineOrchestrator with all real production components."""
     from influence_monitor.email.registry import EMAIL_REGISTRY
+    from influence_monitor.extraction.equity_whitelist import SymbolWhitelist
     from influence_monitor.ingestion.registry import SOURCE_REGISTRY
     from influence_monitor.market_data.alpha_vantage_client import AlphaVantageClient
     from influence_monitor.market_data.yfinance_client import YFinanceClient
     from influence_monitor.scoring.claude_client import ClaudeHaikuClient
 
     ingestor = SOURCE_REGISTRY[settings.twitter_source](settings)
-    ticker_extractor = TickerExtractor()
+    ticker_extractor = TickerExtractor(SymbolWhitelist.load())
     llm_client = ClaudeHaikuClient(settings, repo)
     scoring_engine = await ScoringEngine.from_db(repo)
     corroboration_detector = CorroborationDetector(settings.corroboration_multiplier)

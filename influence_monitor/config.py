@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     recipient_email: str = ""
 
     # Optional with defaults
-    sender_email: str = "Influence Monitor <monitor@yourdomain.com>"
+    sender_email: str = "Influence Monitor <onboarding@resend.dev>"
     twitter_source: str = "twitter_twikit"
     email_provider: str = "resend"
     database_path: str = "data/signals.db"
