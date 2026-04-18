@@ -5,17 +5,18 @@ failure modes from TDD.md Section 6.  The two public entry points are:
 
   ``run_morning(run_date)``   — fetch → extract → score → rank → email
   ``run_evening(run_date)``   — score returns → render scorecard → email
-  ``run_open_prices(run_date)`` — 9:31 AM open-price fetch step
 
 Failure contract: a pipeline failure NEVER sends a partial or misleading
 email to the user.  On IngestorError or any unhandled exception the
 orchestrator sends an operational failure email and aborts.
 
+Open and close prices are fetched together in ``run_evening`` using a
+single historical OHLCV call — no separate 9:31 AM open-price step needed.
+
 CLI entry points::
 
     python -m influence_monitor.pipeline morning [--dry-run]
     python -m influence_monitor.pipeline evening [--dry-run]
-    python -m influence_monitor.pipeline open_prices
 
 ``--dry-run`` renders the email to stdout and skips DB writes + sending.
 """
@@ -394,48 +395,6 @@ class PipelineOrchestrator:
         return {"status": "ok", "signals": len(ranked), "posts": len(posts)}
 
     # ------------------------------------------------------------------
-    # Open prices (9:31 AM step)
-    # ------------------------------------------------------------------
-
-    async def run_open_prices(self, run_date: date) -> dict[str, Any]:
-        """Fetch and store open prices for today's morning watchlist signals.
-
-        Called at 9:31 AM ET by a separate GitHub Actions job.
-        """
-        if not self._calendar.is_trading_day(run_date):
-            logger.info("run_open_prices(%s): not a trading day — skipping", run_date)
-            return {"status": "skipped"}
-
-        signals = await self._repo.get_signals_awaiting_open_price(run_date)
-        if not signals:
-            logger.info("run_open_prices(%s): no signals awaiting open price", run_date)
-            return {"status": "ok", "fetched": 0}
-
-        fetched = errors = 0
-        for sig in signals:
-            try:
-                ohlcv = self._market_client.fetch_ohlcv(sig["ticker"], run_date)
-                open_price = ohlcv.get("open")
-                prev_close = ohlcv.get("close")  # prior day's close from 5d window
-                if open_price:
-                    await self._repo.update_signal_prices(
-                        sig["id"],
-                        open_price=open_price,
-                        prev_close_price=prev_close,
-                    )
-                    fetched += 1
-            except Exception as exc:
-                logger.warning(
-                    "Open price fetch failed for %s: %s", sig["ticker"], exc
-                )
-                errors += 1
-
-        logger.info(
-            "run_open_prices(%s): fetched=%d errors=%d", run_date, fetched, errors
-        )
-        return {"status": "ok", "fetched": fetched, "errors": errors}
-
-    # ------------------------------------------------------------------
     # Evening pipeline
     # ------------------------------------------------------------------
 
@@ -660,8 +619,6 @@ async def _async_main(command: str, dry_run: bool) -> None:
             result = await orchestrator.run_morning(run_date, dry_run=dry_run)
         elif command == "evening":
             result = await orchestrator.run_evening(run_date, dry_run=dry_run)
-        elif command == "open_prices":
-            result = await orchestrator.run_open_prices(run_date)
         elif command == "auth":
             from influence_monitor.ingestion.twitter_twikit import TwitterIngestor
             ingestor = TwitterIngestor(settings)
@@ -670,7 +627,7 @@ async def _async_main(command: str, dry_run: bool) -> None:
             result = {"status": "ok"}
         else:
             print(f"Unknown command: {command}", file=sys.stderr)
-            print("Usage: python -m influence_monitor.pipeline [morning|evening|open_prices|auth] [--dry-run]")
+            print("Usage: python -m influence_monitor.pipeline [morning|evening|auth] [--dry-run]")
             sys.exit(1)
 
         logger.info("Pipeline result: %s", result)
@@ -683,7 +640,7 @@ def main() -> None:
 
     args = sys.argv[1:]
     if not args:
-        print("Usage: python -m influence_monitor.pipeline [morning|evening|open_prices|auth] [--dry-run]")
+        print("Usage: python -m influence_monitor.pipeline [morning|evening|auth] [--dry-run]")
         sys.exit(1)
 
     command = args[0]

@@ -112,21 +112,24 @@ class ScorecardEngine:
             signal_id = sig["id"]
             ticker = sig["ticker"]
             direction = sig["direction"]
-            open_price = sig.get("open_price")
             sector = sig.get("sector")  # may already be populated
 
-            if open_price is None:
-                logger.warning(
-                    "Signal %d (%s) has no open_price — skipping score",
-                    signal_id, ticker,
-                )
-                errors += 1
-                continue
-
-            # --- close price + OHLCV ---
+            # Fetch OHLCV first — provides open, high, low, close, volume in one call.
+            # Both open and close prices are available from historical data after market close,
+            # so no separate 9:31 AM fetch step is required.
             ohlcv = await self._fetch_ohlcv_safe(ticker, signal_date)
             if ohlcv is None:
                 await self._repo.update_signal_prices(signal_id)  # keep NULLs
+                errors += 1
+                continue
+
+            # Use stored open_price if present (e.g. captured intraday); fall back to OHLCV open.
+            open_price = sig.get("open_price") or ohlcv.get("open")
+            if open_price is None:
+                logger.warning(
+                    "Signal %d (%s) has no open_price in DB or OHLCV — skipping",
+                    signal_id, ticker,
+                )
                 errors += 1
                 continue
 

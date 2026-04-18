@@ -161,7 +161,6 @@ def _make_orchestrator(
     ingestor_error: Exception | None = None,
     morning_error: Exception | None = None,
     evening_error: Exception | None = None,
-    signals_awaiting: list | None = None,
 ) -> tuple[PipelineOrchestrator, MagicMock]:
     """Build a PipelineOrchestrator with every component mocked."""
     settings = MagicMock()
@@ -174,7 +173,6 @@ def _make_orchestrator(
     repo = AsyncMock()
     repo.get_active_investors.return_value = []
     repo.upsert_daily_summary.return_value = 1
-    repo.get_signals_awaiting_open_price.return_value = signals_awaiting or []
 
     ingestor = AsyncMock()
     if ingestor_error:
@@ -364,62 +362,6 @@ class TestRunEvening:
         result = await orch.run_evening(_RUN_DATE, dry_run=True)
         assert result["status"] == "dry_run"
         email.send.assert_not_called()
-
-
-class TestRunOpenPrices:
-    @pytest.mark.asyncio
-    async def test_non_trading_day_skipped(self) -> None:
-        orch, _ = _make_orchestrator(is_trading_day=False)
-        result = await orch.run_open_prices(_HOLIDAY)
-        assert result["status"] == "skipped"
-
-    @pytest.mark.asyncio
-    async def test_no_signals_returns_zero_fetched(self) -> None:
-        orch, _ = _make_orchestrator(signals_awaiting=[])
-        result = await orch.run_open_prices(_RUN_DATE)
-        assert result["status"] == "ok"
-        assert result["fetched"] == 0
-
-    @pytest.mark.asyncio
-    async def test_fetches_open_price_for_each_signal(self) -> None:
-        signals = [
-            {"id": 1, "ticker": "AAPL"},
-            {"id": 2, "ticker": "MSFT"},
-        ]
-        orch, _ = _make_orchestrator(signals_awaiting=signals)
-        orch._market_client.fetch_ohlcv.return_value = {"open": 150.0, "close": 149.0}
-        result = await orch.run_open_prices(_RUN_DATE)
-        assert result["fetched"] == 2
-        assert result["errors"] == 0
-        assert orch._repo.update_signal_prices.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_fetch_error_counted_not_raised(self) -> None:
-        signals = [{"id": 1, "ticker": "FNMA"}]
-        orch, _ = _make_orchestrator(signals_awaiting=signals)
-        orch._market_client.fetch_ohlcv.side_effect = Exception("API error")
-        result = await orch.run_open_prices(_RUN_DATE)
-        assert result["errors"] == 1
-        assert result["fetched"] == 0
-        orch._repo.update_signal_prices.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_partial_failure_continues(self) -> None:
-        signals = [
-            {"id": 1, "ticker": "GOOD"},
-            {"id": 2, "ticker": "BAD"},
-        ]
-        orch, _ = _make_orchestrator(signals_awaiting=signals)
-
-        def _side_effect(ticker, run_date):
-            if ticker == "BAD":
-                raise Exception("rate limited")
-            return {"open": 100.0, "close": 99.0}
-
-        orch._market_client.fetch_ohlcv.side_effect = _side_effect
-        result = await orch.run_open_prices(_RUN_DATE)
-        assert result["fetched"] == 1
-        assert result["errors"] == 1
 
 
 # ======================================================================

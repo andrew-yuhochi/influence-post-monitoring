@@ -206,10 +206,28 @@ class TestRunEvening:
         assert ret == round(ret, 4)
 
     @pytest.mark.asyncio
-    async def test_null_open_price_skipped(self) -> None:
-        """Signals with no open_price are skipped (counted as error)."""
+    async def test_null_open_price_falls_back_to_ohlcv(self) -> None:
+        """open_price=NULL in DB falls back to ohlcv['open'] — signal is scored normally."""
+        sig = _signal_row(ticker="FNMA", direction="LONG", open_price=None)
+        # OHLCV provides both open and close — no separate 9:31 AM fetch needed
+        engine, repo = _make_engine([sig], {"FNMA": _ohlcv(open_=10.0, close=10.42)})
+
+        with _patch_yf():
+            result = await engine.run_evening(_TODAY)
+
+        assert result["errors"] == 0
+        assert result["signals_scored"] == 1
+        assert result["hits"] == 1
+        call_kwargs = repo.update_signal_prices.call_args
+        assert call_kwargs.kwargs["return_pct"] == pytest.approx(4.2, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_null_open_price_and_ohlcv_open_missing_is_error(self) -> None:
+        """open_price=NULL in DB and ohlcv has no 'open' field → error, skipped."""
         sig = _signal_row(open_price=None)
-        engine, repo = _make_engine([sig])
+        # OHLCV returns but has no 'open' key
+        ohlcv_no_open = {"high": 10.8, "low": 9.9, "close": 10.42, "volume": 1_000_000}
+        engine, repo = _make_engine([sig], {"FNMA": ohlcv_no_open})
 
         with _patch_yf():
             result = await engine.run_evening(_TODAY)

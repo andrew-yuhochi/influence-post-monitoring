@@ -1,0 +1,55 @@
+name: Morning Pipeline
+
+on:
+  schedule:
+    # 7:00 AM EST (12:00 UTC) — works year-round; 8:00 AM EDT in summer
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Download database artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: signals-db
+          path: data/
+        continue-on-error: true  # first run — no artifact yet
+
+      - name: Run morning pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TWITTER_USERNAME: ${{ secrets.TWITTER_USERNAME }}
+          TWITTER_EMAIL: ${{ secrets.TWITTER_EMAIL }}
+          TWITTER_PASSWORD: ${{ secrets.TWITTER_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          DATABASE_PATH: data/signals.db
+        run: python -m influence_monitor.pipeline morning
+
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signals-db
+          path: data/signals.db
+          retention-days: 90
+          overwrite: true
