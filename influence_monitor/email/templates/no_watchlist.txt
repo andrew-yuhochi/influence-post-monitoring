@@ -1,9 +1,0 @@
-INFLUENCE MONITOR                          {date_long}
-Evening Scorecard                          {send_time} ET
-─────────────────────────────────────────────────────────────
-
-No watchlist to score today — no overnight signals were detected this morning.
-
-{track_record_section}
-─────────────────────────────────────────────────────────────
-Next morning watchlist at 7:00 AM ET tomorrow.

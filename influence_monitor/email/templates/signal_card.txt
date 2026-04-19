@@ -1,7 +1,0 @@
-┌─────────────────────────────────────────────────────────────┐
-│  #{rank}  [{direction}]  {ticker}  [{index_tier}]
-│  Signal Strength:  {strength_bars}{corroboration_line}
-│
-│  {investor_name}  ({handle})  |  Track record: {track_record}
-│  {quote_fragment}
-└─────────────────────────────────────────────────────────────┘
