@@ -5,7 +5,7 @@ Return a JSON object with exactly this schema:
 {
   "tickers": ["TICKER1", "TICKER2"],   // US equity tickers mentioned or implied
   "direction": "LONG"|"SHORT"|"NEUTRAL"|"AMBIGUOUS",
-  "conviction_level": 1-5,             // 1=casual mention, 5=high-conviction specific claim
+  "conviction_level": 0-5,             // 0=no signal, 1=casual mention, 5=high-conviction specific claim
   "key_claim": "...",                  // 1-2 sentence summary of the core investment thesis
   "argument_quality": "HIGH"|"MEDIUM"|"LOW",  // quality of supporting reasoning
   "time_horizon": "days"|"weeks"|"months"|"years"|"unspecified",
