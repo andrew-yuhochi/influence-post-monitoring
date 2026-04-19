@@ -345,8 +345,7 @@ class TestActNowEmpty:
 class TestBothEmpty:
     def test_no_signals_message(self) -> None:
         result = _joined(render_morning([], []))
-        assert "No signals above threshold" in result
-        assert "Nothing actionable overnight" in result
+        assert "No signals for today" in result
 
     def test_no_disclaimer_on_empty(self) -> None:
         result = _joined(render_morning([], []))

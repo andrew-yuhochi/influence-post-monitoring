@@ -111,8 +111,7 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
     if not act_now and not watch:
         parts = [
             date_header,
-            "No signals above threshold. No emerging velocity detected.",
-            "_Nothing actionable overnight — check back this evening._",
+            "❌ No signals for today.",
         ]
         return ["\n".join(parts)]
 
