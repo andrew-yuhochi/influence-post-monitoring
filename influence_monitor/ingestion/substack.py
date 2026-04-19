@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from influence_monitor.ingestion.base import RawPost, SocialMediaSource
+from influence_monitor.ingestion.base import RawPost, Retweeter, SocialMediaSource
 
 
 class SubstackIngestor(SocialMediaSource):
@@ -20,8 +20,16 @@ class SubstackIngestor(SocialMediaSource):
         )
 
     async def fetch_recent_posts(
-        self, author_handle: str, since: datetime, max_count: int = 20,
+        self, author_handle: str, since: datetime, max_count: int = 20, max_pages: int = 1,
     ) -> list[RawPost]:
+        raise NotImplementedError
+
+    async def fetch_retweeters(
+        self, post_external_id: str, max_count: int = 100,
+    ) -> list[Retweeter]:
+        raise NotImplementedError
+
+    async def search_user(self, display_name: str) -> list[object]:
         raise NotImplementedError
 
     def source_type(self) -> str:

@@ -1,8 +1,9 @@
 """Base interfaces for social media ingestion.
 
 Defines the SocialMediaSource ABC that all ingestors implement,
-the RawPost dataclass for uniform post representation, and
-the IngestorError exception for pipeline-level failures.
+the RawPost dataclass for uniform post representation,
+the Retweeter dataclass, and the IngestorError exception for
+pipeline-level failures.
 """
 
 from __future__ import annotations
@@ -58,6 +59,21 @@ class RawPost:
     raw_payload: dict = field(default_factory=dict)
 
 
+@dataclass
+class Retweeter:
+    """A user who retweeted a post.
+
+    Used by AmplifierFetcher to score amplifier quality (F4).
+    All retweeters are persisted to the retweeters table at fetch time
+    regardless of whether they are monitored accounts.
+    """
+
+    external_id: str
+    screen_name: str
+    followers_count: int | None
+    is_verified: bool
+
+
 class SocialMediaSource(ABC):
     """Abstract contract for any post-ingestion source.
 
@@ -80,6 +96,29 @@ class SocialMediaSource(ABC):
         ...
 
     @abstractmethod
+    async def fetch_retweeters(
+        self,
+        post_external_id: str,
+        max_count: int = 100,
+    ) -> list[Retweeter]:
+        """Fetch up to *max_count* retweeters for *post_external_id*.
+
+        Only called for Act Now candidates (~5–10/day) to respect rate limits.
+        Returns an empty list on failure; does not raise.
+        """
+        ...
+
+    @abstractmethod
+    async def search_user(self, display_name: str) -> list[object]:
+        """Search for users by display name.
+
+        Returns a list of platform User objects for handle-rediscovery
+        by AccountRegistry when consecutive_failures is exhausted.
+        The caller applies the credible-rename heuristic to the results.
+        """
+        ...
+
+    @abstractmethod
     def source_type(self) -> str:
-        """Return the source identifier, e.g. ``'twitter'``."""
+        """Return the source identifier, e.g. ``'twitter_twikit'``."""
         ...

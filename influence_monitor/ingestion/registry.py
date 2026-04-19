@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from influence_monitor.ingestion.base import SocialMediaSource
-from influence_monitor.ingestion.twitter_twikit import TwitterIngestor
+from influence_monitor.ingestion.twitter_twikit import TwitterTwikitSource, TwitterIngestor  # noqa: F401
 
 if TYPE_CHECKING:
     pass
@@ -22,7 +22,7 @@ from influence_monitor.ingestion.substack import SubstackIngestor  # noqa: E402
 from influence_monitor.ingestion.congressional import CongressionalIngestor  # noqa: E402
 
 SOURCE_REGISTRY: dict[str, type[SocialMediaSource]] = {
-    "twitter_twikit": TwitterIngestor,
+    "twitter_twikit": TwitterTwikitSource,
     "twitter_official": TwitterOfficialIngestor,
     "substack": SubstackIngestor,
     "congressional": CongressionalIngestor,

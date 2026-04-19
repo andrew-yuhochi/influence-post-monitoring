@@ -6,6 +6,10 @@ investor accounts on X/Twitter.
 WARNING: twikit violates X Terms of Service. Account suspension risk
 exists. This is accepted for PoC personal use. Swap path to the
 official API is TwitterOfficialIngestor (twitter_official.py).
+
+Classes exported:
+  - TwitterTwikitSource: the primary implementation (TDD §2.1 name)
+  - TwitterIngestor: backward-compatible alias for existing call sites
 """
 
 from __future__ import annotations
@@ -26,7 +30,12 @@ from twikit.errors import (
 )
 
 from influence_monitor.config import Settings
-from influence_monitor.ingestion.base import IngestorError, RawPost, SocialMediaSource
+from influence_monitor.ingestion.base import (
+    IngestorError,
+    RawPost,
+    Retweeter,
+    SocialMediaSource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +110,7 @@ def _extract_url_links(tweet: Any) -> list[str]:
         return []
 
 
-class TwitterIngestor(SocialMediaSource):
+class TwitterTwikitSource(SocialMediaSource):
     """Fetches posts from monitored X/Twitter accounts via twikit.
 
     Authentication flow:
@@ -130,9 +139,9 @@ class TwitterIngestor(SocialMediaSource):
         else:
             logger.info("No cookies found — logging in with credentials")
             await self._client.login(
-                auth_info_1=self._settings.twitter_username,
-                auth_info_2=self._settings.twitter_email,
-                password=self._settings.twitter_password,
+                auth_info_1=self._settings.twikit_username or self._settings.twitter_username,
+                auth_info_2=self._settings.twikit_email or self._settings.twitter_email,
+                password=self._settings.twikit_password or self._settings.twitter_password,
             )
             self._cookies_path.parent.mkdir(parents=True, exist_ok=True)
             self._client.save_cookies(str(self._cookies_path))
@@ -141,7 +150,7 @@ class TwitterIngestor(SocialMediaSource):
         self._authenticated = True
 
     def source_type(self) -> str:
-        return "twitter"
+        return "twitter_twikit"
 
     async def fetch_recent_posts(
         self,
@@ -155,6 +164,9 @@ class TwitterIngestor(SocialMediaSource):
         Resolves handle → numeric user_id via get_user_by_screen_name(), then
         paginates through up to *max_pages* pages of *max_count* tweets each,
         stopping early once all tweets on a page predate *since*.
+
+        Raises on any network or API error — the caller (AccountRegistry /
+        PipelineOrchestrator) is responsible for failure accounting.
         """
         await self._ensure_authenticated()
 
@@ -204,7 +216,7 @@ class TwitterIngestor(SocialMediaSource):
                 quote_tweet_id = str(quote.id) if quote else None
 
                 raw_post = RawPost(
-                    source_type="twitter",
+                    source_type="twitter_twikit",
                     external_id=tweet_id,
                     author_handle=author_handle,
                     author_external_id=user_id,
@@ -244,6 +256,68 @@ class TwitterIngestor(SocialMediaSource):
             len(posts), author_handle, since.isoformat(),
         )
         return posts
+
+    async def fetch_retweeters(
+        self,
+        post_external_id: str,
+        max_count: int = 100,
+    ) -> list[Retweeter]:
+        """Fetch up to *max_count* retweeters for *post_external_id*.
+
+        Wraps twikit ``client.get_retweeters(tweet_id)``.  Only called for
+        Act Now candidates (~5–10 calls/day) to respect rate limits.
+        Returns an empty list on any failure.
+        """
+        await self._ensure_authenticated()
+
+        try:
+            users = await self._client.get_retweeters(tweet_id=post_external_id)
+        except Exception as exc:
+            logger.warning(
+                "fetch_retweeters failed for post %s: %s: %s",
+                post_external_id, type(exc).__name__, exc,
+            )
+            return []
+
+        retweeters: list[Retweeter] = []
+        for user in users[:max_count]:
+            retweeters.append(
+                Retweeter(
+                    external_id=str(getattr(user, "id", "")),
+                    screen_name=getattr(user, "screen_name", "") or "",
+                    followers_count=_safe_int(getattr(user, "followers_count", None)),
+                    is_verified=bool(getattr(user, "is_verified", False) or getattr(user, "is_blue_verified", False)),
+                )
+            )
+
+        logger.info(
+            "Fetched %d retweeters for post %s",
+            len(retweeters), post_external_id,
+        )
+        return retweeters
+
+    async def search_user(self, display_name: str) -> list[object]:
+        """Search for users by display name for handle-rediscovery.
+
+        Called by AccountRegistry when consecutive_failures is exhausted
+        before promoting a backup — tries to detect a handle rename first.
+
+        Returns a list of twikit User objects; the caller applies the
+        credible-rename heuristic (exact display_name + verified + comparable
+        follower count) to decide whether to update the handle or promote a
+        backup.
+        """
+        await self._ensure_authenticated()
+
+        try:
+            results = await self._client.search_user(display_name)
+            return list(results) if results else []
+        except Exception as exc:
+            logger.warning(
+                "search_user failed for display_name=%r: %s: %s",
+                display_name, type(exc).__name__, exc,
+            )
+            return []
 
     async def fetch_all_accounts(
         self,
@@ -298,3 +372,7 @@ class TwitterIngestor(SocialMediaSource):
             len(all_posts), success_count, len(handles), failure_count,
         )
         return all_posts, success_count, failure_count
+
+
+# Backward-compatible alias — existing call sites using TwitterIngestor continue to work
+TwitterIngestor = TwitterTwikitSource
