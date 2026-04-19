@@ -268,22 +268,27 @@ class SignalRepository:
         status: str = "primary",
         backup_rank: int | None = None,
         notes: str = "",
+        follower_count_at_post: int | None = None,
     ) -> int | None:
         """Insert or update an account row. Returns rowid on sqlite3 backend."""
         return self._execute_write(
             """INSERT INTO accounts
                (tenant_id, user_id, handle, display_name, angle,
-                credibility_score, status, backup_rank, notes)
-               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+                credibility_score, status, backup_rank, notes,
+                follower_count_at_post)
+               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tenant_id, handle) DO UPDATE SET
                  display_name=excluded.display_name,
                  angle=excluded.angle,
                  credibility_score=excluded.credibility_score,
                  status=excluded.status,
                  backup_rank=excluded.backup_rank,
-                 notes=excluded.notes""",
+                 notes=excluded.notes,
+                 follower_count_at_post=COALESCE(excluded.follower_count_at_post,
+                                                  accounts.follower_count_at_post)""",
             [tenant_id, handle, display_name, angle,
-             credibility_score, status, backup_rank, notes],
+             credibility_score, status, backup_rank, notes,
+             follower_count_at_post],
         )
 
     def update_account_failure(

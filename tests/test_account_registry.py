@@ -243,13 +243,14 @@ class TestAccountRegistry:
     # Test 3: transient failures (below threshold) skip resolution sequence
     # ------------------------------------------------------------------
 
-    def test_validate_skips_accounts_below_threshold(self):
+    @pytest.mark.asyncio
+    async def test_validate_skips_accounts_below_threshold(self):
         primary = self._make_primary(consecutive_failures=2)  # below default max=3
         repo = _make_repo([primary])
         source = _make_source()
         registry = AccountRegistry(repo, source)
 
-        asyncio.get_event_loop().run_until_complete(registry.validate_and_promote())
+        await registry.validate_and_promote()
 
         # No resolution attempted — search_user never called
         source.search_user.assert_not_called()
@@ -259,7 +260,8 @@ class TestAccountRegistry:
     # Test 4: failures at threshold + debounce elapsed → name search → rename
     # ------------------------------------------------------------------
 
-    def test_rename_path_when_credible_match_found(self):
+    @pytest.mark.asyncio
+    async def test_rename_path_when_credible_match_found(self):
         """Repeated failures → name search → credible rename → update handle, no promotion."""
         past_failure = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         primary = self._make_primary(
@@ -279,7 +281,6 @@ class TestAccountRegistry:
         )
 
         call_count = {"n": 0}
-        original_search = AsyncMock()
 
         async def _mock_search(query: str):
             call_count["n"] += 1
@@ -295,7 +296,7 @@ class TestAccountRegistry:
         repo = _make_repo([primary])
         registry = AccountRegistry(repo, source)
 
-        asyncio.get_event_loop().run_until_complete(registry.validate_and_promote())
+        await registry.validate_and_promote()
 
         # Handle was renamed to NewHandle
         repo.rename_account_handle.assert_called_once_with(1, "NewHandle")
@@ -312,7 +313,8 @@ class TestAccountRegistry:
     # Test 5: failures at threshold + no credible match → backup promotion
     # ------------------------------------------------------------------
 
-    def test_backup_promotion_when_no_credible_match(self):
+    @pytest.mark.asyncio
+    async def test_backup_promotion_when_no_credible_match(self):
         """Repeated failures → name search → no match → backup promoted."""
         past_failure = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         primary = self._make_primary(
@@ -328,15 +330,10 @@ class TestAccountRegistry:
         repo = _make_repo([primary], backups=[backup])
         registry = AccountRegistry(repo, source)
 
-        asyncio.get_event_loop().run_until_complete(registry.validate_and_promote())
+        await registry.validate_and_promote()
 
         # Primary marked inactive
         upsert_calls = repo.upsert_account.call_args_list
-        inactive_call = next(
-            (c for c in upsert_calls if c.kwargs.get("status") == "inactive" or
-             (len(c.args) > 0 and "inactive" in str(c.args))),
-            None,
-        )
         # Check inactive was set via upsert_account with handle=InactiveHandle
         found_inactive = False
         found_promotion = False
@@ -357,7 +354,8 @@ class TestAccountRegistry:
     # Test 6: all backups exhausted → ERROR logged
     # ------------------------------------------------------------------
 
-    def test_all_backups_exhausted_logs_error(self, caplog):
+    @pytest.mark.asyncio
+    async def test_all_backups_exhausted_logs_error(self, caplog):
         """When all backups exhausted after a primary goes inactive, log ERROR."""
         import logging
 
@@ -375,7 +373,7 @@ class TestAccountRegistry:
         registry = AccountRegistry(repo, source)
 
         with caplog.at_level(logging.ERROR, logger="influence_monitor.ingestion.account_registry"):
-            asyncio.get_event_loop().run_until_complete(registry.validate_and_promote())
+            await registry.validate_and_promote()
 
         assert any(
             "All backups exhausted" in r.message or "exhausted" in r.message
@@ -387,7 +385,8 @@ class TestAccountRegistry:
     # Test 7: debounce — skip resolution when within retry_rest_minutes window
     # ------------------------------------------------------------------
 
-    def test_debounce_skips_resolution_within_window(self):
+    @pytest.mark.asyncio
+    async def test_debounce_skips_resolution_within_window(self):
         """Account with failures at threshold but recent failure → skips resolution."""
         # last_failure_at = just 5 minutes ago, retry_rest_minutes = 30
         recent_failure = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
@@ -400,7 +399,7 @@ class TestAccountRegistry:
         repo = _make_repo([primary], config={"max_consecutive_failures": 3, "retry_rest_minutes": 30})
         registry = AccountRegistry(repo, source)
 
-        asyncio.get_event_loop().run_until_complete(registry.validate_and_promote())
+        await registry.validate_and_promote()
 
         # Within debounce window — no resolution triggered
         source.search_user.assert_not_called()

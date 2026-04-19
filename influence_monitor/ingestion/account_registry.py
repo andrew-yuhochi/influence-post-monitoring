@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from influence_monitor.db.repository import SignalRepository
-from influence_monitor.ingestion.base import SocialMediaSource
+from influence_monitor.ingestion.base import IngestorError, RawPost, SocialMediaSource
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +268,92 @@ class AccountRegistry:
                 "_check_handle_reachable failed for @%s: %s", handle, exc,
             )
         return False
+
+    async def fetch_all_accounts(
+        self,
+        since: datetime,
+        max_count: int = 20,
+        max_pages: int = 1,
+    ) -> tuple[list[RawPost], int, int]:
+        """Fetch posts for all active primary accounts with repo-backed failure tracking.
+
+        For each account:
+          - On success: calls ``record_fetch_success`` (resets consecutive_failures)
+            and inserts an engagement snapshot for each new post saved to the DB.
+          - On failure: calls ``record_fetch_failure`` (increments consecutive_failures).
+
+        Returns (all_posts, success_count, failure_count).
+        Raises IngestorError when the source threshold is breached (delegated to
+        the source's own ``fetch_all_accounts`` logic).
+        """
+        active_accounts = self.get_active_accounts()
+        handle_to_account: dict[str, dict[str, Any]] = {
+            acc["handle"]: acc for acc in active_accounts
+        }
+        handles = list(handle_to_account.keys())
+
+        all_posts: list[RawPost] = []
+        success_count = 0
+        failure_count = 0
+
+        for handle in handles:
+            account = handle_to_account[handle]
+            account_id = account["id"]
+            try:
+                posts = await self._source.fetch_recent_posts(
+                    handle, since, max_count, max_pages
+                )
+                all_posts.extend(posts)
+                success_count += 1
+                self.record_fetch_success(account_id)
+
+                # Persist posts and insert engagement snapshots
+                for post in posts:
+                    post_id = self._repo.insert_post(
+                        tenant_id=self._tenant_id,
+                        account_id=account_id,
+                        external_id=post.external_id,
+                        source_type=post.source_type,
+                        text=post.text,
+                        posted_at=post.posted_at,
+                        fetched_at=post.fetched_at,
+                        view_count=post.view_count,
+                        repost_count=post.repost_count,
+                        reply_count=post.reply_count,
+                        like_count=post.like_count,
+                        bookmark_count=post.bookmark_count,
+                        raw_payload=post.raw_payload if post.raw_payload else None,
+                    )
+                    if post_id is not None:
+                        # New post — record engagement baseline snapshot
+                        self._repo.insert_engagement_snapshot(
+                            post_id=post_id,
+                            view_count=post.view_count,
+                            repost_count=post.repost_count,
+                            reply_count=post.reply_count,
+                            like_count=post.like_count,
+                        )
+
+                # Update follower_count_at_post from the most recent post (if any)
+                if posts and posts[0].follower_count_at_post is not None:
+                    self._repo.upsert_account(
+                        tenant_id=self._tenant_id,
+                        handle=handle,
+                        follower_count_at_post=posts[0].follower_count_at_post,
+                    )
+
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch @%s: %s: %s", handle, type(exc).__name__, exc,
+                )
+                failure_count += 1
+                self.record_fetch_failure(account_id)
+
+        logger.info(
+            "Ingestion complete: %d posts from %d/%d accounts (%d failed)",
+            len(all_posts), success_count, len(handles), failure_count,
+        )
+        return all_posts, success_count, failure_count
 
     def _mark_inactive_and_promote(self, account_id: int, handle: str) -> None:
         """Mark *account_id* inactive and promote the next backup."""
