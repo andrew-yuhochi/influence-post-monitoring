@@ -7,19 +7,24 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DISCLAIMER = "_This is information about public posts, not investment advice. Do your own research._"
+_FILLED = "✅"
 
-_DOTS = ["○○○○○", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"]
+
+@dataclass
+class Poster:
+    handle: str
+    strategy: str
 
 
 @dataclass
 class MorningSignal:
     ticker: str
-    poster_handle: str
+    posters: list[Poster]
     direction: str              # "LONG" | "SHORT"
     conviction_score: float     # 0.0–10.0
     summary: str
@@ -28,92 +33,129 @@ class MorningSignal:
     direction_flip: bool
     conflict_group: str         # "" | "opposing_exists"
     tier: str                   # "act_now" | "watch"
+    post_created_at: datetime   # time the original post was published
 
 
-def _conviction_dots(score: float) -> str:
+def _direction_label(direction: str) -> str:
+    if direction == "LONG":
+        return "Buy"
+    if direction == "SHORT":
+        return "Sell"
+    return direction
+
+
+def _direction_emoji(direction: str) -> str:
+    if direction == "LONG":
+        return "📈"
+    if direction == "SHORT":
+        return "📉"
+    return ""
+
+
+def _conviction_display(score: float) -> str:
+    """Return tick emoji bar + percentage score (filled ticks only, no empty markers)."""
     if score >= 9.0:
-        return _DOTS[5]
-    if score >= 7.0:
-        return _DOTS[4]
-    if score >= 5.0:
-        return _DOTS[3]
-    if score >= 3.0:
-        return _DOTS[2]
-    if score >= 1.0:
-        return _DOTS[1]
-    return _DOTS[0]
+        filled = 5
+    elif score >= 7.0:
+        filled = 4
+    elif score >= 5.0:
+        filled = 3
+    elif score >= 3.0:
+        filled = 2
+    elif score >= 1.0:
+        filled = 1
+    else:
+        filled = 0
+    bar = _FILLED * filled
+    pct = round(score / 10 * 100)
+    return f"{bar} - {pct}%"
+
+
+def _truncate_words(text: str, max_words: int) -> str:
+    """Return text truncated to max_words words, appending … if cut."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]) + "…"
 
 
 def _render_signal_block(signal: MorningSignal, include_velocity: bool = False) -> str:
+    label = _direction_label(signal.direction)
+    emoji = _direction_emoji(signal.direction)
     lines: list[str] = []
-    lines.append(f"*{signal.direction} ${signal.ticker}*")
-    lines.append(f"Score: {_conviction_dots(signal.conviction_score)}")
-    lines.append(f"@{signal.poster_handle}")
+    lines.append(f"*{emoji} {label} ${signal.ticker}*")
+    lines.append(f"Score: {_conviction_display(signal.conviction_score)}")
 
-    if signal.corroboration_count >= 2:
-        lines.append(f"CORROBORATED — {signal.corroboration_count} posters")
+    for poster in signal.posters:
+        lines.append(f"@{poster.handle} - {poster.strategy}")
+
     if signal.direction_flip:
-        lines.append("⚠️ Direction changed")
+        lines.append("🔄 Direction changed")
     if signal.conflict_group == "opposing_exists":
-        lines.append("⚠️ Conflicted — opposing view exists")
+        lines.append("⚔️ Conflicted — opposing view exists")
 
-    summary_fragment = signal.summary[:150]
-    if len(signal.summary) > 150:
-        summary_fragment += "..."
-    lines.append(f'> "{summary_fragment}"')
+    quote = _truncate_words(signal.summary, 20)
+    lines.append(f'> "{quote}"')
 
     if include_velocity:
-        lines.append(f"_{int(signal.views_per_hour):,} views/hr — watch if it keeps spreading_")
+        vph = f"{int(signal.views_per_hour):,}"
+        posted_time = signal.post_created_at.strftime("%H:%M")
+        lines.append(f"_{vph} posts/hr — Posted {posted_time}_")
 
     return "\n".join(lines)
 
 
-def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> str:
+def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> list[str]:
+    date_header = "📅 *Morning Alert — " + datetime.now().strftime("%-d %b %Y") + "*"
+
     if not act_now and not watch:
         parts = [
+            date_header,
             "No signals above threshold. No emerging velocity detected.",
             "_Nothing actionable overnight — check back this evening._",
-            "",
-            DISCLAIMER,
         ]
-        return "\n".join(parts)
+        return ["\n".join(parts)]
 
     top_act = sorted(act_now, key=lambda s: s.conviction_score, reverse=True)[:5]
     top_watch = sorted(watch, key=lambda s: s.views_per_hour, reverse=True)[:5]
 
-    sections: list[str] = []
-
-    sections.append("━━━ ACT NOW ━━━")
+    # Build ACT NOW section
+    act_sections: list[str] = [date_header, ""]
+    act_sections.append("━━━ ACT NOW ━━━")
     if top_act:
-        sections.append(f"{len(top_act)} signal{'s' if len(top_act) != 1 else ''} above threshold")
-        sections.append("")
+        n = len(top_act)
+        act_sections.append(f"*{n}* signal{'s' if n != 1 else ''} need immediate action")
+        act_sections.append("")
         for sig in top_act:
-            sections.append(_render_signal_block(sig, include_velocity=False))
-            sections.append("")
+            act_sections.append(_render_signal_block(sig, include_velocity=False))
+            act_sections.append("")
     else:
-        sections.append("No high-conviction signals")
-        sections.append("")
+        act_sections.append("No high-conviction signals")
+        act_sections.append("")
 
-    sections.append("━━━ WATCH LIST ━━━")
+    # Build WATCH LIST section
+    watch_sections: list[str] = []
+    watch_sections.append("━━━ WATCH LIST ━━━")
     if top_watch:
-        sections.append(f"{len(top_watch)} signal{'s' if len(top_watch) != 1 else ''} gaining momentum")
-        sections.append("")
+        n = len(top_watch)
+        watch_sections.append(f"*{n}* signal{'s' if n != 1 else ''} need close attention")
+        watch_sections.append("")
         for sig in top_watch:
-            sections.append(_render_signal_block(sig, include_velocity=True))
-            sections.append("")
+            watch_sections.append(_render_signal_block(sig, include_velocity=True))
+            watch_sections.append("")
     else:
-        sections.append("No signals gaining momentum")
-        sections.append("")
+        watch_sections.append("No signals need close attention")
+        watch_sections.append("")
 
-    sections.append(DISCLAIMER)
+    msg1 = "\n".join(act_sections)
+    msg2 = "\n".join(watch_sections)
+    full = msg1 + "\n" + msg2
 
-    result = "\n".join(sections)
+    if len(full) <= 4000:
+        return [full]
 
-    if len(result) > 4000:
-        logger.warning("Rendered morning alert exceeds 4000 chars (%d); truncating.", len(result))
-        result = result[:3990] + "\n[truncated]"
-
-    return result
+    logger.info("Morning alert exceeds 4000 chars (%d); splitting into two messages.", len(full))
+    return [msg1, msg2]
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +165,10 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
 DEMO_FIXTURE: list[MorningSignal] = [
     MorningSignal(
         ticker="FNMA",
-        poster_handle="BillAckman",
+        posters=[
+            Poster(handle="BillAckman", strategy="activist investor"),
+            Poster(handle="DavidEinhorn", strategy="value investor"),
+        ],
         direction="LONG",
         conviction_score=9.2,
         summary="Fannie Mae is absurdly underpriced. Regulatory unlock is imminent and this goes 10x from here.",
@@ -132,10 +177,11 @@ DEMO_FIXTURE: list[MorningSignal] = [
         direction_flip=False,
         conflict_group="",
         tier="act_now",
+        post_created_at=datetime(2026, 4, 18, 6, 47),
     ),
     MorningSignal(
         ticker="NFLX",
-        poster_handle="WallStCynic",
+        posters=[Poster(handle="WallStCynic", strategy="short seller")],
         direction="SHORT",
         conviction_score=7.4,
         summary="Netflix subscriber growth story is over. Ad tier economics do not pencil out at scale.",
@@ -144,10 +190,11 @@ DEMO_FIXTURE: list[MorningSignal] = [
         direction_flip=True,
         conflict_group="",
         tier="act_now",
+        post_created_at=datetime(2026, 4, 18, 7, 12),
     ),
     MorningSignal(
         ticker="TSLA",
-        poster_handle="ValueInvestor99",
+        posters=[Poster(handle="ValueInvestor99", strategy="value investor")],
         direction="LONG",
         conviction_score=6.1,
         summary="TSLA energy business is worth more than the car business alone. Market ignoring it.",
@@ -156,10 +203,11 @@ DEMO_FIXTURE: list[MorningSignal] = [
         direction_flip=False,
         conflict_group="opposing_exists",
         tier="act_now",
+        post_created_at=datetime(2026, 4, 18, 7, 32),
     ),
     MorningSignal(
         ticker="NOVA",
-        poster_handle="hkuppy",
+        posters=[Poster(handle="hkuppy", strategy="macro trader")],
         direction="LONG",
         conviction_score=4.2,
         summary="Solar permitting reform is the real catalyst here. Consensus underestimates the timing.",
@@ -168,10 +216,11 @@ DEMO_FIXTURE: list[MorningSignal] = [
         direction_flip=False,
         conflict_group="",
         tier="watch",
+        post_created_at=datetime(2026, 4, 18, 5, 58),
     ),
     MorningSignal(
         ticker="RIVN",
-        poster_handle="StockJabber",
+        posters=[Poster(handle="StockJabber", strategy="short seller")],
         direction="SHORT",
         conviction_score=3.8,
         summary="RIVN cash burn rate means dilution is coming faster than bulls expect. Run the math.",
@@ -180,6 +229,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         direction_flip=False,
         conflict_group="",
         tier="watch",
+        post_created_at=datetime(2026, 4, 18, 8, 15),
     ),
 ]
 
@@ -200,20 +250,22 @@ def _main() -> None:
     act_now = [s for s in DEMO_FIXTURE if s.tier == "act_now"]
     watch = [s for s in DEMO_FIXTURE if s.tier == "watch"]
 
-    rendered = render_morning(act_now, watch)
-    sys.stdout.write(rendered + "\n")
+    messages = render_morning(act_now, watch)
+    for msg in messages:
+        sys.stdout.write(msg + "\n")
 
     from influence_monitor.delivery.registry import DELIVERY_REGISTRY
     try:
         provider = DELIVERY_REGISTRY["twilio"]()
-        success = provider.send(rendered)
     except Exception as exc:
         logger.error("Delivery instantiation failed: %s", exc)
         sys.exit(1)
 
-    if not success:
-        logger.error("Morning alert delivery failed.")
-        sys.exit(1)
+    for msg in messages:
+        success = provider.send(msg)
+        if not success:
+            logger.error("Morning alert delivery failed.")
+            sys.exit(1)
 
     logger.info("Morning alert sent successfully.")
     sys.exit(0)
