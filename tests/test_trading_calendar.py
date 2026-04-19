@@ -247,3 +247,20 @@ class TestCollectionWindow:
         prev_close, _ = cal.collection_window(send_time)
         assert prev_close.date() == date(2026, 12, 24)
         assert prev_close.hour == 16  # NOTE: Dec 24 is early-close (13:00 actual) but PoC returns 16:00
+
+
+# ---------------------------------------------------------------------------
+# Standalone tests (use module-level cal instance)
+# ---------------------------------------------------------------------------
+
+def test_previous_trading_day_after_weekend(cal: TradingCalendar):
+    """previous_trading_day(Mon Apr 20) = Fri Apr 17 (normal Friday, no holiday)"""
+    assert cal.previous_trading_day(date(2026, 4, 20)) == date(2026, 4, 17)
+
+
+def test_collection_window_tuesday(cal: TradingCalendar):
+    """collection_window for Tue Apr 21 09:00 ET → prev_close = Mon Apr 20 16:00 ET"""
+    send_time = datetime(2026, 4, 21, 9, 0, tzinfo=ZoneInfo("America/New_York"))
+    prev_close, send_dt = cal.collection_window(send_time)
+    assert prev_close == datetime(2026, 4, 20, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert send_dt == send_time
