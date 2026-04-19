@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from influence_monitor.db.repository import SignalRepository
 
+_DEFAULT_TENANT_ID = 1
+
 logger = logging.getLogger(__name__)
 
 MarketCapClass = Literal["Mega", "Large", "Mid", "Small", "Micro"]
@@ -86,7 +88,7 @@ def _classify(market_cap_m: float | None) -> MarketCapClass:
 
 
 class MarketCapResolver:
-    """Resolve a ticker symbol to its market-cap class.
+    """Resolve a ticker symbol to its market-cap class and liquidity modifier.
 
     Cache-first: checks price_cache (7-day TTL) before calling finvizfinance.
     Falls back to "Micro" on any finvizfinance exception.
@@ -94,14 +96,27 @@ class MarketCapResolver:
     Usage::
 
         resolver = MarketCapResolver(repo)
-        cap_class = resolver.resolve("AAPL")   # → "Mega"
+        cap_class, modifier = resolver.resolve("AAPL")   # → ("Mega", 0.8)
     """
 
-    def __init__(self, repo: "SignalRepository") -> None:
+    def __init__(self, repo: "SignalRepository", tenant_id: int = _DEFAULT_TENANT_ID) -> None:
         self._repo = repo
+        self._tenant_id = tenant_id
+        cfg = repo.get_scoring_config(tenant_id=tenant_id)
+        self._liq_modifiers: dict[str, float] = {
+            "mega": float(cfg.get("liq_mega", 0.8)),
+            "large": float(cfg.get("liq_large", 0.9)),
+            "mid": float(cfg.get("liq_mid", 1.0)),
+            "small": float(cfg.get("liq_small", 1.15)),
+            "micro": float(cfg.get("liq_micro", 1.3)),
+        }
 
-    def resolve(self, ticker: str) -> MarketCapClass:
-        """Return the market-cap class for *ticker*.
+    def _get_modifier(self, cap_class: MarketCapClass) -> float:
+        """Return the liquidity modifier for *cap_class* (from scoring_config)."""
+        return self._liq_modifiers.get(cap_class.lower(), 1.0)
+
+    def resolve(self, ticker: str) -> tuple[MarketCapClass, float]:
+        """Return the market-cap class and liquidity modifier for *ticker*.
 
         Checks the 7-day price_cache first. On a miss, calls finvizfinance,
         parses the "Market Cap" field, classifies it, and upserts the cache.
@@ -113,8 +128,10 @@ class MarketCapResolver:
 
         Returns
         -------
-        str
-            One of "Mega", "Large", "Mid", "Small", "Micro".
+        tuple[str, float]
+            ``(cap_class, liquidity_modifier)`` where cap_class is one of
+            "Mega", "Large", "Mid", "Small", "Micro" and liquidity_modifier
+            is the corresponding value from scoring_config (e.g. 0.8 for Mega).
         """
         ticker_upper = ticker.upper()
 
@@ -122,8 +139,12 @@ class MarketCapResolver:
         cached = self._repo.get_cached_market_cap(ticker_upper)
         if cached is not None:
             cap_class: MarketCapClass = cached["market_cap_class"]  # type: ignore[assignment]
-            logger.debug("MarketCapResolver cache hit: %s → %s", ticker_upper, cap_class)
-            return cap_class
+            modifier = self._get_modifier(cap_class)
+            logger.debug(
+                "MarketCapResolver cache hit: %s → %s (modifier=%.2f)",
+                ticker_upper, cap_class, modifier,
+            )
+            return cap_class, modifier
 
         # Cache miss — call finvizfinance
         try:
@@ -140,7 +161,7 @@ class MarketCapResolver:
                 ticker_upper,
                 exc,
             )
-            return "Micro"
+            return "Micro", self._get_modifier("Micro")
 
         market_cap_m = _parse_market_cap_to_millions(raw_cap)
         cap_class = _classify(market_cap_m)
@@ -156,11 +177,13 @@ class MarketCapResolver:
             industry=industry,
         )
 
+        modifier = self._get_modifier(cap_class)
         logger.info(
-            "MarketCapResolver fetched %s: raw=%r → %.1fM → %s (cached)",
+            "MarketCapResolver fetched %s: raw=%r → %.1fM → %s modifier=%.2f (cached)",
             ticker_upper,
             raw_cap,
             market_cap_m or 0.0,
             cap_class,
+            modifier,
         )
-        return cap_class
+        return cap_class, modifier

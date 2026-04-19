@@ -4,12 +4,11 @@ For each ACT_NOW candidate, fetches up to 100 retweeters from the social media
 source, persists them to the retweeters table, and computes a 0–10 amplifier
 score based on follower-count tiers and monitored-account cross-reference.
 
-Formula (per scoring_config thresholds):
+Formula (TDD §2.3):
     high_tier     = retweeters with followers_count >= amplifier_high_follower_tier
     mid_tier      = retweeters with amplifier_mid_follower_tier <= followers_count < high_tier
     monitored     = retweeters whose external_id appears in accounts.external_id
-    raw           = high_tier * 3 + mid_tier * 1 + monitored * 5
-    score         = min(raw / 10, 10.0)
+    score         = min(10, monitored_count * 3 + high_tier * 1.5 + mid_tier * 0.5)
 """
 
 from __future__ import annotations
@@ -61,6 +60,7 @@ class AmplifierFetcher:
         post: RawPost,
         source: SocialMediaSource,
         post_db_id: int,
+        tier: str = "ACT_NOW",
     ) -> float:
         """Fetch retweeters for *post*, persist them, and return the F4 score (0–10).
 
@@ -73,12 +73,22 @@ class AmplifierFetcher:
         post_db_id:
             The integer primary-key of the post row in the ``posts`` table.
             Required for the ``retweeters.post_id`` FK.
+        tier:
+            Signal tier.  Only ACT_NOW posts are amplifier-scored; any other
+            tier returns 0.0 immediately without calling fetch_retweeters.
 
         Returns
         -------
         float
-            Amplifier score in [0.0, 10.0]. Returns 0.0 on fetch failure.
+            Amplifier score in [0.0, 10.0]. Returns 0.0 on fetch failure or
+            when tier != "ACT_NOW".
         """
+        if tier != "ACT_NOW":
+            logger.debug(
+                "AmplifierFetcher skipped: tier=%s is not ACT_NOW", tier
+            )
+            return 0.0
+
         try:
             retweeters = source.fetch_retweeters(post.external_id, max_count=100)
         except Exception as exc:  # noqa: BLE001
@@ -124,16 +134,14 @@ class AmplifierFetcher:
                 is_monitored=is_monitored,
             )
 
-        raw = high_tier * 3 + mid_tier * 1 + monitored_count * 5
-        score = min(raw / 10.0, 10.0)
+        score = min(10.0, monitored_count * 3 + high_tier * 1.5 + mid_tier * 0.5)
 
         logger.info(
-            "Amplifier for post %s: high=%d mid=%d monitored=%d → raw=%.1f score=%.2f",
+            "Amplifier for post %s: high=%d mid=%d monitored=%d → score=%.2f",
             post.external_id,
             high_tier,
             mid_tier,
             monitored_count,
-            raw,
             score,
         )
         return score

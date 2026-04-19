@@ -61,9 +61,22 @@ def test_classify(market_cap_m: float | None, expected_class: str) -> None:
 # MarketCapResolver integration (mocked repo + finvizfinance)
 # ---------------------------------------------------------------------------
 
-def _make_repo(cached_row: dict | None = None) -> MagicMock:
+_DEFAULT_SCORING_CONFIG = {
+    "liq_mega": 0.8,
+    "liq_large": 0.9,
+    "liq_mid": 1.0,
+    "liq_small": 1.15,
+    "liq_micro": 1.3,
+}
+
+
+def _make_repo(
+    cached_row: dict | None = None,
+    scoring_config: dict | None = None,
+) -> MagicMock:
     repo = MagicMock()
     repo.get_cached_market_cap.return_value = cached_row
+    repo.get_scoring_config.return_value = scoring_config or _DEFAULT_SCORING_CONFIG
     return repo
 
 
@@ -71,9 +84,9 @@ def _make_fundamentals(market_cap: str, sector: str = "Finance", industry: str =
     return {"Market Cap": market_cap, "Sector": sector, "Industry": industry}
 
 
-# Scenario 1: "3911.50B" → 3_911_500M → Mega
+# Scenario 1: "3911.50B" → 3_911_500M → Mega, modifier 0.8
 def test_resolve_mega_cap(tmp_path) -> None:
-    """'3911.50B' → Mega; finvizfinance called; result cached."""
+    """'3911.50B' → Mega, modifier=0.8; finvizfinance called; result cached."""
     repo = _make_repo(cached_row=None)
 
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
@@ -82,18 +95,19 @@ def test_resolve_mega_cap(tmp_path) -> None:
         mock_stock.TickerFundamentals.return_value = _make_fundamentals("3911.50B")
 
         resolver = MarketCapResolver(repo)
-        result = resolver.resolve("BRK.A")
+        cap_class, modifier = resolver.resolve("BRK.A")
 
-    assert result == "Mega"
+    assert cap_class == "Mega"
+    assert modifier == pytest.approx(0.8)
     repo.upsert_price_cache.assert_called_once()
     call_kwargs = repo.upsert_price_cache.call_args.kwargs
     assert call_kwargs["market_cap_class"] == "Mega"
     assert call_kwargs["ticker"] == "BRK.A"
 
 
-# Scenario 2: "498.22M" → 498M → Small
+# Scenario 2: "498.22M" → 498M → Small, modifier 1.15
 def test_resolve_small_cap() -> None:
-    """'498.22M' → Small; correct class returned and cached."""
+    """'498.22M' → Small, modifier=1.15; correct class returned and cached."""
     repo = _make_repo(cached_row=None)
 
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
@@ -102,14 +116,15 @@ def test_resolve_small_cap() -> None:
         mock_stock.TickerFundamentals.return_value = _make_fundamentals("498.22M")
 
         resolver = MarketCapResolver(repo)
-        result = resolver.resolve("SMID")
+        cap_class, modifier = resolver.resolve("SMID")
 
-    assert result == "Small"
+    assert cap_class == "Small"
+    assert modifier == pytest.approx(1.15)
 
 
-# Scenario 3: "" → None → Micro
+# Scenario 3: "" → None → Micro, modifier 1.3
 def test_resolve_empty_market_cap_returns_micro() -> None:
-    """Empty market cap string → Micro; result still cached."""
+    """Empty market cap string → Micro, modifier=1.3; result still cached."""
     repo = _make_repo(cached_row=None)
 
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
@@ -118,18 +133,19 @@ def test_resolve_empty_market_cap_returns_micro() -> None:
         mock_stock.TickerFundamentals.return_value = {"Market Cap": "", "Sector": None, "Industry": None}
 
         resolver = MarketCapResolver(repo)
-        result = resolver.resolve("OTC")
+        cap_class, modifier = resolver.resolve("OTC")
 
-    assert result == "Micro"
+    assert cap_class == "Micro"
+    assert modifier == pytest.approx(1.3)
     repo.upsert_price_cache.assert_called_once()
     call_kwargs = repo.upsert_price_cache.call_args.kwargs
     assert call_kwargs["market_cap_class"] == "Micro"
     assert call_kwargs["market_cap_b"] is None
 
 
-# Scenario 4: Cache hit → returns cached class, no finvizfinance call
+# Scenario 4: Cache hit → returns cached class + modifier, no finvizfinance call
 def test_cache_hit_skips_finvizfinance() -> None:
-    """Cache hit → returns stored market_cap_class; finvizfinance not called."""
+    """Cache hit → returns stored market_cap_class + modifier; finvizfinance not called."""
     cached = {
         "ticker": "AAPL",
         "market_cap_b": 3_200.0,
@@ -142,9 +158,10 @@ def test_cache_hit_skips_finvizfinance() -> None:
 
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         resolver = MarketCapResolver(repo)
-        result = resolver.resolve("AAPL")
+        cap_class, modifier = resolver.resolve("AAPL")
 
-    assert result == "Mega"
+    assert cap_class == "Mega"
+    assert modifier == pytest.approx(0.8)
     mock_fvf.assert_not_called()
     repo.upsert_price_cache.assert_not_called()
 
@@ -160,18 +177,19 @@ def test_cache_miss_calls_finvizfinance_and_caches() -> None:
         mock_stock.TickerFundamentals.return_value = _make_fundamentals("25.50B", "Technology", "Software")
 
         resolver = MarketCapResolver(repo)
-        result = resolver.resolve("MSFT")
+        cap_class, modifier = resolver.resolve("MSFT")
 
-    assert result == "Large"
+    assert cap_class == "Large"
+    assert modifier == pytest.approx(0.9)
     mock_fvf.assert_called_once()
     repo.upsert_price_cache.assert_called_once()
 
 
-# Scenario 6: finvizfinance raises → returns "Micro", logs WARNING, no raise
+# Scenario 6: finvizfinance raises → returns ("Micro", 1.3), logs WARNING, no raise
 def test_finvizfinance_exception_returns_micro_and_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """finvizfinance raising → returns 'Micro', logs WARNING, does not raise."""
+    """finvizfinance raising → returns ('Micro', 1.3), logs WARNING, does not raise."""
     repo = _make_repo(cached_row=None)
 
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
@@ -179,9 +197,10 @@ def test_finvizfinance_exception_returns_micro_and_logs(
 
         with caplog.at_level(logging.WARNING, logger="influence_monitor.scoring.market_cap_resolver"):
             resolver = MarketCapResolver(repo)
-            result = resolver.resolve("UNKN")
+            cap_class, modifier = resolver.resolve("UNKN")
 
-    assert result == "Micro"
+    assert cap_class == "Micro"
+    assert modifier == pytest.approx(1.3)
     assert any("Micro" in r.message or "403" in r.message for r in caplog.records)
     repo.upsert_price_cache.assert_not_called()
 
@@ -202,3 +221,37 @@ def test_ticker_normalised_to_upper_case() -> None:
     mock_fvf.assert_called_once_with("TSLA")
     call_kwargs = repo.upsert_price_cache.call_args.kwargs
     assert call_kwargs["ticker"] == "TSLA"
+
+
+# Scenario 8: Large-cap → modifier 0.9
+def test_resolve_large_cap_modifier() -> None:
+    """Large-cap ticker → modifier=0.9."""
+    repo = _make_repo(cached_row=None)
+
+    with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
+        mock_stock = MagicMock()
+        mock_fvf.return_value = mock_stock
+        mock_stock.TickerFundamentals.return_value = _make_fundamentals("25.00B")
+
+        resolver = MarketCapResolver(repo)
+        cap_class, modifier = resolver.resolve("AAPL")
+
+    assert cap_class == "Large"
+    assert modifier == pytest.approx(0.9)
+
+
+# Scenario 9: Mid-cap → modifier 1.0
+def test_resolve_mid_cap_modifier() -> None:
+    """Mid-cap ticker → modifier=1.0."""
+    repo = _make_repo(cached_row=None)
+
+    with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
+        mock_stock = MagicMock()
+        mock_fvf.return_value = mock_stock
+        mock_stock.TickerFundamentals.return_value = _make_fundamentals("3.50B")
+
+        resolver = MarketCapResolver(repo)
+        cap_class, modifier = resolver.resolve("MID")
+
+    assert cap_class == "Mid"
+    assert modifier == pytest.approx(1.0)

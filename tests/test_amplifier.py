@@ -83,7 +83,7 @@ def test_zero_retweeters_returns_zero() -> None:
 
 
 def test_one_monitored_match_returns_positive() -> None:
-    """1 monitored match → score > 0."""
+    """1 monitored match → score = min(10, 1*3 + 0 + 0) = 3.0."""
     monitored_id = "monitored_user"
     repo = _make_repo(monitored_ids={monitored_id})
     source = _make_source([
@@ -93,13 +93,13 @@ def test_one_monitored_match_returns_positive() -> None:
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
 
-    # monitored_count=1, high=0, mid=0 → raw = 5 → score = 0.5
+    # monitored_count=1, high=0, mid=0 → score = min(10, 1*3 + 0*1.5 + 0*0.5) = 3.0
     assert score > 0.0
-    assert score == pytest.approx(0.5)
+    assert score == pytest.approx(3.0)
 
 
 def test_high_and_mid_tier_retweeters_score_correct() -> None:
-    """3 high-tier + 2 mid-tier retweeters → expected formula output (raw / 10)."""
+    """3 high-tier + 2 mid-tier retweeters → min(10, 3*1.5 + 2*0.5) = 5.5."""
     repo = _make_repo()
     retweeters = [
         _make_retweeter(f"high_{i}", followers_count=200_000) for i in range(3)
@@ -111,21 +111,25 @@ def test_high_and_mid_tier_retweeters_score_correct() -> None:
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
 
-    # high=3, mid=2, monitored=0 → raw = 3*3 + 2*1 = 11 → score = 11/10 = 1.1
-    assert score == pytest.approx(1.1)
+    # high=3, mid=2, monitored=0 → score = min(10, 0*3 + 3*1.5 + 2*0.5) = min(10, 5.5) = 5.5
+    assert score == pytest.approx(5.5)
 
 
 def test_score_capped_at_ten() -> None:
-    """Many high-tier retweeters — score must not exceed 10.0."""
-    repo = _make_repo()
+    """4 monitored + 4 high-tier → min(10, 4*3 + 4*1.5) = min(10, 18) = 10.0."""
+    monitored_ids = {f"mon_{i}" for i in range(4)}
+    repo = _make_repo(monitored_ids=monitored_ids)
     retweeters = [
-        _make_retweeter(f"big_{i}", followers_count=5_000_000) for i in range(50)
+        _make_retweeter(f"mon_{i}", followers_count=5_000_000) for i in range(4)  # monitored + high
+    ] + [
+        _make_retweeter(f"high_{i}", followers_count=5_000_000) for i in range(4)  # high only
     ]
     source = _make_source(retweeters)
     fetcher = AmplifierFetcher(repo)
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
 
+    # monitored=4, high=8 (all >=100k), mid=0 → score = min(10, 4*3 + 8*1.5) = min(10, 24) = 10.0
     assert score == pytest.approx(10.0)
 
 
@@ -173,8 +177,8 @@ def test_mid_tier_threshold_boundary() -> None:
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
 
-    # mid=1, high=0, monitored=0 → raw=1 → score=0.1
-    assert score == pytest.approx(0.1)
+    # mid=1, high=0, monitored=0 → score = min(10, 0*3 + 0*1.5 + 1*0.5) = 0.5
+    assert score == pytest.approx(0.5)
 
 
 def test_high_tier_threshold_boundary() -> None:
@@ -187,5 +191,48 @@ def test_high_tier_threshold_boundary() -> None:
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
 
-    # high=1, mid=0, monitored=0 → raw=3 → score=0.3
-    assert score == pytest.approx(0.3)
+    # high=1, mid=0, monitored=0 → score = min(10, 0*3 + 1*1.5 + 0*0.5) = 1.5
+    assert score == pytest.approx(1.5)
+
+
+def test_three_monitored_matches() -> None:
+    """W1: 3 monitored matches, 0 high, 0 mid → min(10, 3*3) = 9.0."""
+    monitored_ids = {"mon_0", "mon_1", "mon_2"}
+    repo = _make_repo(monitored_ids=monitored_ids)
+    source = _make_source([
+        _make_retweeter(mid, followers_count=500) for mid in monitored_ids  # low tier, monitored
+    ])
+    fetcher = AmplifierFetcher(repo)
+
+    score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1)
+
+    # monitored=3, high=0, mid=0 → score = min(10, 3*3 + 0 + 0) = 9.0
+    assert score == pytest.approx(9.0)
+
+
+# ---------------------------------------------------------------------------
+# ACT_NOW gating (C2)
+# ---------------------------------------------------------------------------
+
+def test_skipped_for_watch_tier() -> None:
+    """fetch_and_score returns 0.0 and does NOT call fetch_retweeters for WATCH tier."""
+    repo = _make_repo()
+    source = _make_source([_make_retweeter("user_001", followers_count=500_000)])
+    fetcher = AmplifierFetcher(repo)
+
+    score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1, tier="WATCH")
+
+    assert score == 0.0
+    source.fetch_retweeters.assert_not_called()
+
+
+def test_skipped_for_unscored_tier() -> None:
+    """fetch_and_score returns 0.0 and does NOT call fetch_retweeters for UNSCORED tier."""
+    repo = _make_repo()
+    source = _make_source([_make_retweeter("user_002", followers_count=500_000)])
+    fetcher = AmplifierFetcher(repo)
+
+    score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1, tier="UNSCORED")
+
+    assert score == 0.0
+    source.fetch_retweeters.assert_not_called()

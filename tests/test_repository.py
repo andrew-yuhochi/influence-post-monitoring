@@ -862,3 +862,80 @@ def test_scoring_config_seed_all_have_key_and_value() -> None:
     for i, row in enumerate(data):
         assert "key" in row, f"scoring_config_seed.json row {i} missing 'key'"
         assert "value" in row, f"scoring_config_seed.json row {i} missing 'value'"
+
+
+# ---------------------------------------------------------------------------
+# Round-trip tests for TASK-009 repo methods (W2)
+# ---------------------------------------------------------------------------
+
+def test_upsert_and_get_price_cache(tmp_path: Path) -> None:
+    """upsert_price_cache inserts a row; get_cached_market_cap retrieves it."""
+    repo = _make_repo(tmp_path)
+    try:
+        repo.upsert_price_cache(
+            ticker="AAPL",
+            market_cap_b=3_200.0,
+            market_cap_class="Mega",
+            sector="Technology",
+            industry="Consumer Electronics",
+        )
+        result = repo.get_cached_market_cap("AAPL")
+        assert result is not None, "get_cached_market_cap returned None for freshly inserted row"
+        assert result["ticker"] == "AAPL"
+        assert result["market_cap_class"] == "Mega"
+        assert result["market_cap_b"] == pytest.approx(3_200.0)
+        assert result["sector"] == "Technology"
+        assert result["industry"] == "Consumer Electronics"
+    finally:
+        repo.close()
+
+
+def test_price_cache_7_day_ttl(tmp_path: Path) -> None:
+    """get_cached_market_cap returns None when last_updated is older than 7 days."""
+    repo = _make_repo(tmp_path)
+    try:
+        # Insert a row directly with a stale timestamp (8 days ago)
+        import sqlite3
+        db_path = tmp_path / "test_signals.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """INSERT INTO price_cache
+                   (ticker, market_cap_b, market_cap_class, sector, industry, last_updated)
+                   VALUES ('STALE', 50.0, 'Small', 'Finance', 'Banks', datetime('now', '-8 days'))"""
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # The 7-day TTL filter should exclude the stale row
+        result = repo.get_cached_market_cap("STALE")
+        assert result is None, (
+            "get_cached_market_cap should return None for rows older than 7 days, "
+            f"but got: {result}"
+        )
+    finally:
+        repo.close()
+
+
+def test_get_account_external_ids(tmp_path: Path) -> None:
+    """get_account_external_ids returns a set containing seeded external_ids."""
+    repo = _make_repo(tmp_path)
+    repo.seed(phone_e164="+14161234567", tenant_id=1)
+    try:
+        # Seed accounts from config/accounts.json; some should have external_ids set
+        ext_ids = repo.get_account_external_ids(tenant_id=1)
+        assert isinstance(ext_ids, set), "get_account_external_ids should return a set"
+        # None of the external_ids should be None (method filters NULL)
+        assert None not in ext_ids, "get_account_external_ids returned a None value"
+
+        # Insert an account with a known external_id and verify it shows up
+        repo._execute_write(
+            "UPDATE accounts SET external_id = 'ext_test_001' WHERE handle = 'BillAckman'"
+        )
+        ext_ids_after = repo.get_account_external_ids(tenant_id=1)
+        assert "ext_test_001" in ext_ids_after, (
+            "ext_test_001 not found in get_account_external_ids after update"
+        )
+    finally:
+        repo.close()
