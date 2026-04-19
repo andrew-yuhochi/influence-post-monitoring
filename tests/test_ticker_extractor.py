@@ -64,7 +64,7 @@ class TestUppercaseExtraction:
         assert tsla[0].extraction_method == "uppercase"
 
     @pytest.mark.parametrize("false_positive", [
-        "CEO", "IPO", "ETF", "GDP", "FED",
+        "CEO", "IPO", "ETF", "GDP", "FED", "SEC", "NYSE", "USD",
     ])
     def test_false_positives_filtered(
         self, extractor: TickerExtractor, false_positive: str,
