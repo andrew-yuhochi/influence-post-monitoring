@@ -52,22 +52,26 @@ class ClaudeHaikuClient(LLMClient):
         """Score a post via Claude Haiku. Returns zero sentinel on any failure."""
         user_message = f"Post by @{author_handle}:\n\n{post_text}"
 
-        # First attempt
-        result = self._call_api(user_message)
-        if result is not None:
-            return result
+        try:
+            # First attempt
+            return self._call_api(user_message)
+        except anthropic.APIError:
+            pass
 
-        # Retry once after delay
+        # Retry once after delay — only for APIError
         logger.info("Retrying Claude API call after %ds", _RETRY_DELAY_SECONDS)
         time.sleep(_RETRY_DELAY_SECONDS)
-        result = self._call_api(user_message)
-        if result is not None:
-            return result
+        try:
+            return self._call_api(user_message)
+        except anthropic.APIError:
+            return PostScore.zero_sentinel()
 
-        return PostScore.zero_sentinel()
+    def _call_api(self, user_message: str) -> PostScore:
+        """Single synchronous API call attempt.
 
-    def _call_api(self, user_message: str) -> PostScore | None:
-        """Single synchronous API call attempt. Returns None on failure."""
+        Raises anthropic.APIError on API failure (caller handles retry).
+        Returns zero_sentinel() immediately on parse/validation failure.
+        """
         start = time.monotonic()
         input_tokens = 0
         output_tokens = 0
@@ -100,7 +104,7 @@ class ClaudeHaikuClient(LLMClient):
             status = "error"
             error_message = f"{type(exc).__name__}: {exc}"
             logger.warning("Claude API error: %s", error_message)
-            return None
+            raise
 
         except Exception as exc:
             status = "parse_error"
@@ -110,7 +114,7 @@ class ClaudeHaikuClient(LLMClient):
                 error_message,
                 raw_response[:500],
             )
-            return None
+            return PostScore.zero_sentinel()
 
         finally:
             latency_ms = int((time.monotonic() - start) * 1000)

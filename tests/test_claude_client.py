@@ -116,8 +116,8 @@ def test_malformed_json_returns_zero_sentinel_and_logs_warning(
     # WARNING must be present
     assert any("parse" in r.message.lower() or "validation" in r.message.lower()
                for r in caplog.records if r.levelno == logging.WARNING)
-    # api_usage logged twice: initial attempt + retry (both fail on parse error)
-    assert mock_repo.log_api_usage.call_count == 2
+    # api_usage logged once: parse failure returns zero_sentinel immediately, no retry
+    assert mock_repo.log_api_usage.call_count == 1
 
 
 @patch("influence_monitor.scoring.claude_client.anthropic.Anthropic")
