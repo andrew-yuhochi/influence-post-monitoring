@@ -2,11 +2,11 @@
 # Run as __main__ with --test-message <text> to send a real message.
 import argparse
 import logging
-import os
 
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
+from influence_monitor.config import Settings
 from influence_monitor.delivery.base import MessageDelivery
 
 logger = logging.getLogger(__name__)
@@ -14,10 +14,11 @@ logger = logging.getLogger(__name__)
 
 class TwilioWhatsAppDelivery(MessageDelivery):
     def __init__(self) -> None:
-        self._sid = os.environ["TWILIO_ACCOUNT_SID"]
-        self._token = os.environ["TWILIO_AUTH_TOKEN"]
-        self._from = os.environ["TWILIO_WHATSAPP_FROM"]
-        self._to = os.environ["RECIPIENT_PHONE_E164"]
+        settings = Settings()
+        self._sid = settings.twilio_account_sid
+        self._token = settings.twilio_auth_token
+        self._from = settings.twilio_whatsapp_from
+        self._to = settings.recipient_phone_e164
 
     def send(self, text: str) -> bool:
         try:

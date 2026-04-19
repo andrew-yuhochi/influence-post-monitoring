@@ -13,28 +13,28 @@ pandas_market_calendars>=4.4.0
 spacy==3.8.13
 
 # LLM scoring
-anthropic>=0.49.0
+anthropic==0.95.0
 
 # Data validation & config
-pydantic>=2.0.0,<3.0.0
-pydantic-settings>=2.0.0,<3.0.0
+pydantic==2.13.1
+pydantic-settings==2.13.1
 
 # WhatsApp delivery (primary)
-twilio>=9.0.0
+twilio==9.10.5
 
 # HTTP (CallMeBot fallback + async)
-httpx>=0.27.0
+httpx==0.28.1
 
 # Database (Turso cloud SQLite)
 libsql-client>=0.3.0
 
 # Env file loading (for __main__ entrypoints)
-python-dotenv>=1.0.0
+python-dotenv==1.2.2
 
 # Scheduling (local dev fallback)
 APScheduler==3.11.2
 
 # Testing
-pytest>=8.0.0
-pytest-cov>=6.0.0
-pytest-asyncio>=0.25.0
+pytest==9.0.3
+pytest-cov==7.1.0
+pytest-asyncio==1.3.0
