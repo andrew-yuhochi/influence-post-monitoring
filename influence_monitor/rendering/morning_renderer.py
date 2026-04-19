@@ -34,6 +34,7 @@ class MorningSignal:
     conflict_group: str         # "" | "opposing_exists"
     tier: str                   # "act_now" | "watch"
     post_created_at: datetime   # time the original post was published
+    market_cap_class: str = ""  # "Mega" | "Large" | "Mid" | "Small" | "" (not shown)
 
 
 def _direction_label(direction: str) -> str:
@@ -71,19 +72,27 @@ def _conviction_display(score: float) -> str:
     return f"{bar} - {pct}%"
 
 
-def _truncate_words(text: str, max_words: int) -> str:
-    """Return text truncated to max_words words, appending … if cut."""
-    words = text.split()
-    if len(words) <= max_words:
+def _truncate_chars(text: str, max_chars: int = 150) -> str:
+    """Return text truncated to max_chars characters, appending … if cut.
+
+    Truncation always happens at a whitespace boundary so words are not split.
+    """
+    if len(text) <= max_chars:
         return text
-    return " ".join(words[:max_words]) + "…"
+    # Walk back from max_chars to find the last whitespace boundary.
+    cut = text.rfind(" ", 0, max_chars)
+    if cut == -1:
+        # No whitespace found — hard-cut at max_chars.
+        cut = max_chars
+    return text[:cut] + "…"
 
 
 def _render_signal_block(signal: MorningSignal, include_velocity: bool = False) -> str:
     label = _direction_label(signal.direction)
     emoji = _direction_emoji(signal.direction)
     lines: list[str] = []
-    lines.append(f"*{emoji} {label} ${signal.ticker}*")
+    cap_suffix = f" ({signal.market_cap_class})" if signal.market_cap_class else ""
+    lines.append(f"*{emoji} {label} ${signal.ticker}{cap_suffix}*")
     lines.append(f"Score: {_conviction_display(signal.conviction_score)}")
 
     for poster in signal.posters:
@@ -94,7 +103,7 @@ def _render_signal_block(signal: MorningSignal, include_velocity: bool = False) 
     if signal.conflict_group == "opposing_exists":
         lines.append("⚔️ Conflicted — opposing view exists")
 
-    quote = _truncate_words(signal.summary, 20)
+    quote = _truncate_chars(signal.summary)
     lines.append(f'> "{quote}"')
 
     if include_velocity:
@@ -177,6 +186,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         conflict_group="",
         tier="act_now",
         post_created_at=datetime(2026, 4, 18, 6, 47),
+        market_cap_class="Small",
     ),
     MorningSignal(
         ticker="NFLX",
@@ -190,6 +200,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         conflict_group="",
         tier="act_now",
         post_created_at=datetime(2026, 4, 18, 7, 12),
+        market_cap_class="Large",
     ),
     MorningSignal(
         ticker="TSLA",
@@ -203,6 +214,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         conflict_group="opposing_exists",
         tier="act_now",
         post_created_at=datetime(2026, 4, 18, 7, 32),
+        market_cap_class="Large",
     ),
     MorningSignal(
         ticker="NOVA",
@@ -216,6 +228,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         conflict_group="",
         tier="watch",
         post_created_at=datetime(2026, 4, 18, 5, 58),
+        market_cap_class="Small",
     ),
     MorningSignal(
         ticker="RIVN",
@@ -229,6 +242,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         conflict_group="",
         tier="watch",
         post_created_at=datetime(2026, 4, 18, 8, 15),
+        market_cap_class="Small",
     ),
 ]
 

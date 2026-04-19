@@ -24,7 +24,7 @@ from influence_monitor.rendering.morning_renderer import (
     MorningSignal,
     Poster,
     _conviction_display,
-    _truncate_words,
+    _truncate_chars,
     render_morning,
 )
 
@@ -48,6 +48,7 @@ def _make_signal(
     conflict_group: str = "",
     tier: str = "act_now",
     post_created_at: datetime = _DEFAULT_POST_TIME,
+    market_cap_class: str = "",
     # Legacy convenience params kept for backwards compat with older tests
     poster_handle: str = "TestPoster",
     poster_strategy: str = _DEFAULT_STRATEGY,
@@ -66,6 +67,7 @@ def _make_signal(
         conflict_group=conflict_group,
         tier=tier,
         post_created_at=post_created_at,
+        market_cap_class=market_cap_class,
     )
 
 
@@ -238,8 +240,8 @@ class TestFullAlert:
         assert "12,500 posts/hr" in result
 
     def test_output_under_4000_chars_with_10_short_signals(self) -> None:
-        # With 20-word truncation, summaries are short; single message expected
-        short_summary = "Word " * 5  # 5 words, well under 20
+        # With 150-char truncation, short summaries pass through unchanged; single message expected
+        short_summary = "Word " * 5  # 5 words, well under 150 chars
         act = [
             _make_signal(ticker=f"AC{i}", summary=short_summary.strip(), conviction_score=float(9 - i))
             for i in range(5)
@@ -414,38 +416,51 @@ class TestConflictFlag:
 
 
 # ---------------------------------------------------------------------------
-# New: Quote truncation
+# New: Quote truncation (≤150 characters, word-boundary)
 # ---------------------------------------------------------------------------
 
 
 class TestQuoteTruncation:
     def test_short_summary_not_truncated(self) -> None:
-        words = ["word"] * 10
-        summary = " ".join(words)
-        assert _truncate_words(summary, 20) == summary
+        summary = "word " * 10  # well under 150 chars
+        assert _truncate_chars(summary.strip()) == summary.strip()
 
-    def test_exact_20_words_not_truncated(self) -> None:
-        summary = " ".join(["word"] * 20)
-        assert _truncate_words(summary, 20) == summary
+    def test_exactly_150_chars_not_truncated(self) -> None:
+        summary = "a" * 150
+        assert _truncate_chars(summary) == summary
 
-    def test_21_words_truncated_to_20_plus_ellipsis(self) -> None:
-        summary = " ".join([f"w{i}" for i in range(21)])
-        result = _truncate_words(summary, 20)
+    def test_151_chars_truncated_with_ellipsis(self) -> None:
+        # No spaces — hard-cut at 150
+        text = "a" * 151
+        result = _truncate_chars(text)
         assert result.endswith("…")
-        assert len(result.split("…")[0].split()) == 20
+        assert len(result) == 151  # 150 chars + ellipsis (1 char)
 
-    def test_rendered_quote_truncated_at_20_words(self) -> None:
-        # 25 words — must be truncated to 20 + ellipsis
-        long_summary = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive"
-        act = [_make_signal(summary=long_summary)]
+    def test_truncates_at_word_boundary(self) -> None:
+        # Build a string where the 150-char cut falls mid-word
+        prefix = "hello " * 20  # 120 chars, all space-terminated
+        suffix = "verylongword_overflow"
+        text = prefix.rstrip() + " " + suffix  # 120-1+1+21 = 141+ chars
+        # Pad prefix to push suffix past 150
+        filler = "x" * (150 - len(prefix.rstrip()) - 1)  # place cut mid-word
+        text = prefix.rstrip() + " " + filler + "extrastuff"
+        result = _truncate_chars(text)
+        assert result.endswith("…")
+        # Must not end with a partial word (last real char before … is a space boundary)
+        truncated_body = result[:-1]  # drop ellipsis
+        assert not truncated_body.endswith(" "), "trailing space before ellipsis"
+
+    def test_rendered_quote_under_150_chars(self) -> None:
+        # 200-char summary — rendered quote body must be ≤150 chars + ellipsis
+        long_summary = "word " * 40  # 200 chars
+        act = [_make_signal(summary=long_summary.strip())]
         result = _joined(render_morning(act, []))
-        # Extract quote from rendered output
         for line in result.splitlines():
             if line.startswith('> "'):
                 quote_text = line[3:-1]  # strip '> "' and trailing '"'
                 assert quote_text.endswith("…"), f"Expected ellipsis, got: {quote_text!r}"
-                words_in_quote = quote_text[:-1].split()  # strip the ellipsis char before splitting
-                assert len(words_in_quote) == 20
+                body = quote_text[:-1]  # strip ellipsis char
+                assert len(body) <= 150, f"Body too long: {len(body)}"
                 break
         else:
             pytest.fail("Quote line not found in output")
@@ -458,6 +473,40 @@ class TestQuoteTruncation:
             if line.startswith('> "'):
                 assert "…" not in line
                 break
+
+
+# ---------------------------------------------------------------------------
+# New: market_cap_class in signal header
+# ---------------------------------------------------------------------------
+
+
+class TestMarketCapClass:
+    def test_cap_class_shown_in_parentheses_when_set(self) -> None:
+        act = [_make_signal(ticker="FNMA", direction="LONG", market_cap_class="Small")]
+        result = _joined(render_morning(act, []))
+        assert "*📈 Buy $FNMA (Small)*" in result
+
+    def test_cap_class_large(self) -> None:
+        act = [_make_signal(ticker="NFLX", direction="SHORT", market_cap_class="Large")]
+        result = _joined(render_morning(act, []))
+        assert "*📉 Sell $NFLX (Large)*" in result
+
+    def test_no_parenthetical_when_cap_class_empty(self) -> None:
+        act = [_make_signal(ticker="AAPL", direction="LONG", market_cap_class="")]
+        result = _joined(render_morning(act, []))
+        assert "*📈 Buy $AAPL*" in result
+        assert "($AAPL" not in result
+        assert "AAPL (" not in result
+
+    def test_cap_class_mega(self) -> None:
+        act = [_make_signal(ticker="MSFT", direction="LONG", market_cap_class="Mega")]
+        result = _joined(render_morning(act, []))
+        assert "(Mega)" in result
+
+    def test_cap_class_mid(self) -> None:
+        act = [_make_signal(ticker="XYZ", direction="SHORT", market_cap_class="Mid")]
+        result = _joined(render_morning(act, []))
+        assert "(Mid)" in result
 
 
 # ---------------------------------------------------------------------------
@@ -503,15 +552,17 @@ class TestMessageSplit:
             assert len(messages[0]) <= 4000
 
     def test_two_message_split_structure(self) -> None:
-        # Build a fixture guaranteed to exceed 4000 chars.
-        # Each signal block contributes ~400 chars via a 400-char summary (20 words of ~20 chars each).
-        # 5 act + 5 watch = 10 blocks × ~400 chars + overhead > 4000.
+        # Build a fixture guaranteed to exceed 4000 chars with the 150-char truncation.
+        # Each block: ~25 (header) + ~20 (score) + ~300 (10 posters × ~30) + ~155 (quote) + overhead.
+        # Use 10 posters per signal to bulk up each block to ~500 chars.
+        # 5 act + 5 watch = 10 blocks × ~500 chars + section overhead > 4000.
         long_word = "abcdefghijklmnopqrst"  # 20 chars
-        long_summary = " ".join([long_word] * 20)  # 20 words × 20 chars = 400 chars
+        long_summary = " ".join([long_word] * 20)  # 400 chars → truncated to 150 + ellipsis
+        many_posters = [Poster(handle=f"Poster{j:02d}LongName", strategy="activist investor long strategy") for j in range(10)]
         act = [
             _make_signal(
                 ticker=f"AC{i}",
-                posters=[Poster(handle=f"Poster{i}", strategy="activist investor")],
+                posters=many_posters,
                 summary=long_summary,
                 conviction_score=float(9 - i),
             )
@@ -521,7 +572,7 @@ class TestMessageSplit:
             _make_signal(
                 ticker=f"WC{i}",
                 tier="watch",
-                posters=[Poster(handle=f"WPoster{i}", strategy="activist investor")],
+                posters=many_posters,
                 summary=long_summary,
                 views_per_hour=float(5000 - i * 100),
             )
