@@ -1,0 +1,21 @@
+=== TASK-005: TradingCalendar Demo ===
+
+1. is_trading_day(2026-04-21 Tue)  => True
+2. is_trading_day(2026-04-18 Sat)  => False
+3. is_trading_day(2026-07-04 Sat)  => False  [Jul 4 is Sat; observed Jul 3 also False]
+4. is_trading_day(2026-04-03 Fri)  => False  [Good Friday]
+5. previous_trading_day(2026-04-06 Mon) => 2026-04-02  [skips Good Friday Apr 3 + weekend]
+6. previous_trading_day(2026-05-04 Mon) => 2026-05-01  [Friday Apr 30 is prev close day]
+7. collection_window(2026-04-06 09:00 ET) => prev_close=2026-04-02T16:00:00-04:00
+8. collection_window(2026-04-27 09:00 ET) => prev_close=2026-04-24T16:00:00-04:00
+9. trading_days_after(2026-01-01, 5) => 2026-01-08  [skips New Year Jan 1]
+10. trading_days_after(2026-01-15, 5) => 2026-01-23  [skips MLK Day Jan 19 + weekend]
+
+=== Acceptance Criteria Verification ===
+AC1: is_trading_day(2026-07-04)         => False  [expected: False]
+AC2: is_trading_day(2026-04-03 GoodFri) => False  [expected: False]
+AC3: previous_trading_day(2026-04-06)   => 2026-04-02  [expected: 2026-04-02]
+AC4: collection_window(2026-04-06 09:00 ET).prev_close => 2026-04-02 16:00:00-04:00  [expected: 2026-04-02 16:00 ET]
+AC5: trading_days_after(2026-01-01, 5)  => 2026-01-08  [expected: 2026-01-08, skips weekend+MLK if needed]
+
+All acceptance criteria passed.
