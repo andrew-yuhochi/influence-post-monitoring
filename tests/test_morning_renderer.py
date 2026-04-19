@@ -362,6 +362,13 @@ class TestBothEmpty:
         assert isinstance(messages, list)
         assert len(messages) == 1
 
+    def test_demo_empty_path_returns_nonempty_string(self) -> None:
+        # Exercises the --demo-empty code path: render_morning([], []) must
+        # return a list containing at least one non-empty string.
+        messages = render_morning([], [])
+        assert len(messages) >= 1
+        assert all(len(m) > 0 for m in messages)
+
 
 # ---------------------------------------------------------------------------
 # Scenario 4: Direction flip renders 🔄 Direction changed

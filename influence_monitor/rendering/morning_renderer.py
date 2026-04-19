@@ -241,10 +241,32 @@ DEMO_FIXTURE: list[MorningSignal] = [
 def _main() -> None:
     parser = argparse.ArgumentParser(description="Morning alert renderer")
     parser.add_argument("--demo", action="store_true", help="Render and send the hardcoded fixture")
+    parser.add_argument("--demo-empty", action="store_true", help="Render and send the no-signals state")
     args = parser.parse_args()
 
-    if not args.demo:
+    if not args.demo and not args.demo_empty:
         parser.print_help()
+        sys.exit(0)
+
+    if args.demo_empty:
+        messages = render_morning(act_now=[], watch=[])
+        for msg in messages:
+            sys.stdout.write(msg + "\n")
+
+        from influence_monitor.delivery.registry import DELIVERY_REGISTRY
+        try:
+            provider = DELIVERY_REGISTRY["twilio"]()
+        except Exception as exc:
+            logger.error("Delivery instantiation failed: %s", exc)
+            sys.exit(1)
+
+        for msg in messages:
+            success = provider.send(msg)
+            if not success:
+                logger.error("Morning alert delivery failed.")
+                sys.exit(1)
+
+        logger.info("Morning alert (empty) sent successfully.")
         sys.exit(0)
 
     act_now = [s for s in DEMO_FIXTURE if s.tier == "act_now"]
