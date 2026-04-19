@@ -1,1 +1,87 @@
-{}
+[
+  {
+    "key": "weight_credibility",
+    "value": 0.25,
+    "description": "F1 credibility factor weight in composite conviction score"
+  },
+  {
+    "key": "weight_virality_abs",
+    "value": 0.35,
+    "description": "F2a virality absolute factor weight in composite conviction score"
+  },
+  {
+    "key": "weight_virality_vel",
+    "value": 0.15,
+    "description": "F2b virality velocity factor weight (Watch List path only)"
+  },
+  {
+    "key": "weight_consensus",
+    "value": 0.25,
+    "description": "F3 directional consensus factor weight in composite conviction score"
+  },
+  {
+    "key": "weight_amplifier",
+    "value": 0.20,
+    "description": "F4 amplifier quality factor weight (Act Now path only)"
+  },
+  {
+    "key": "virality_views_threshold",
+    "value": 50000,
+    "description": "Minimum view count for ACT_NOW tier classification"
+  },
+  {
+    "key": "virality_reposts_threshold",
+    "value": 500,
+    "description": "Minimum repost count for ACT_NOW tier classification"
+  },
+  {
+    "key": "watch_velocity_floor",
+    "value": 1000,
+    "description": "Minimum views/hour for WATCH tier classification"
+  },
+  {
+    "key": "direction_flip_penalty",
+    "value": 0.0,
+    "description": "Conviction penalty for same-poster direction flip. Default 0 — tag-only; non-zero activates score deduction"
+  },
+  {
+    "key": "vol_lookback_days",
+    "value": 20,
+    "description": "Trading-day window for stock volatility computation (stock_20d_vol column)"
+  },
+  {
+    "key": "max_consecutive_failures",
+    "value": 3,
+    "description": "Number of consecutive fetch failures before account is marked inactive and backup promoted"
+  },
+  {
+    "key": "retry_rest_minutes",
+    "value": 30,
+    "description": "Wait interval in minutes between successive retries on a failing account"
+  },
+  {
+    "key": "liq_mega",
+    "value": 0.8,
+    "description": "F5 liquidity modifier for Mega-cap stocks (market cap > $200B)"
+  },
+  {
+    "key": "liq_large",
+    "value": 0.9,
+    "description": "F5 liquidity modifier for Large-cap stocks ($10B – $200B)"
+  },
+  {
+    "key": "liq_mid",
+    "value": 1.0,
+    "description": "F5 liquidity modifier for Mid-cap stocks ($2B – $10B)"
+  },
+  {
+    "key": "liq_small",
+    "value": 1.15,
+    "description": "F5 liquidity modifier for Small-cap stocks ($300M – $2B)"
+  },
+  {
+    "key": "liq_micro",
+    "value": 1.3,
+    "description": "F5 liquidity modifier for Micro/OTC stocks (below $300M)"
+  }
+]

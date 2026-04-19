@@ -1,7 +1,7 @@
-"""Database repository — single access point to SQLite.
+"""Database repository — all read/write operations go through SignalRepository.
 
-All read/write operations go through DatabaseRepository.
-Uses aiosqlite for async operations and raw SQL (no ORM).
+Uses libsql_client (Turso) when TURSO_URL is set; falls back to stdlib sqlite3
+on a local data/signals.db when TURSO_URL is empty (dev mode).
 
 CLI entry point:
     python -m influence_monitor.db.repository --init
@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-
-import aiosqlite
 
 from influence_monitor.config import Settings
 
@@ -23,181 +22,325 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_INVESTORS_SEED = _PROJECT_ROOT / "config" / "investors_seed.json"
-_WEIGHTS_SEED = _PROJECT_ROOT / "config" / "scoring_weights_seed.json"
+_ACCOUNTS_SEED = _PROJECT_ROOT / "config" / "accounts.json"
+_SCORING_CONFIG_SEED = _PROJECT_ROOT / "config" / "scoring_config_seed.json"
 
 
-class DatabaseRepository:
-    """Async SQLite repository for all pipeline data operations."""
+# ---------------------------------------------------------------------------
+# Row helper — normalise libsql_client ResultSet rows and sqlite3 Row objects
+# ---------------------------------------------------------------------------
 
-    def __init__(self, settings: Settings) -> None:
-        self._db_path = settings.database_path_resolved
-        self._conn: aiosqlite.Connection | None = None
+def _row_to_dict(row: Any, columns: tuple[str, ...] | None) -> dict[str, Any]:
+    """Convert a libsql_client Row or sqlite3.Row to a plain dict."""
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, "keys"):
+        # sqlite3.Row supports .keys()
+        return dict(row)
+    # libsql_client Row: a tuple, use columns list
+    if columns is not None:
+        return dict(zip(columns, row))
+    raise TypeError(f"Cannot convert row of type {type(row)} to dict")
 
-    # ------------------------------------------------------------------
-    # Connection lifecycle
-    # ------------------------------------------------------------------
 
-    async def connect(self) -> None:
-        """Open a connection and enable WAL mode + foreign keys."""
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(str(self._db_path))
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA foreign_keys=ON")
+# ---------------------------------------------------------------------------
+# Connection abstraction — wraps both backends behind a thin interface
+# ---------------------------------------------------------------------------
 
-    async def close(self) -> None:
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
+class _LibsqlBackend:
+    """Thin wrapper around libsql_client.ClientSync."""
+
+    def __init__(self, url: str, auth_token: str | None) -> None:
+        import libsql_client  # type: ignore[import]
+
+        kwargs: dict[str, Any] = {"url": url}
+        if auth_token:
+            kwargs["auth_token"] = auth_token
+        self._client = libsql_client.create_client_sync(**kwargs)
+
+    def execute(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        result = self._client.execute(sql, params or [])
+        cols = result.columns
+        return [_row_to_dict(r, cols) for r in result.rows]
+
+    def executemany(self, sql: str, param_list: list[list[Any]]) -> None:
+        for params in param_list:
+            self._client.execute(sql, params)
+
+    def executescript(self, script: str) -> None:
+        """Execute a multi-statement SQL script (split on ';')."""
+        statements = [
+            s.strip() for s in script.split(";") if s.strip()
+        ]
+        self._client.batch(statements)
+
+    def close(self) -> None:
+        self._client.close()
 
     @property
-    def conn(self) -> aiosqlite.Connection:
-        if self._conn is None:
-            raise RuntimeError("Database not connected. Call connect() first.")
-        return self._conn
+    def lastrowid(self) -> int | None:
+        return None  # not available via batch/execute on libsql
+
+
+class _Sqlite3Backend:
+    """Thin wrapper around stdlib sqlite3."""
+
+    def __init__(self, db_path: Path) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(db_path))
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+
+    def execute(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        cursor = self._conn.execute(sql, params or [])
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    def execute_returning_lastrowid(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+    ) -> int | None:
+        cursor = self._conn.execute(sql, params or [])
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def executemany(self, sql: str, param_list: list[list[Any]]) -> None:
+        self._conn.executemany(sql, param_list)
+        self._conn.commit()
+
+    def executescript(self, script: str) -> None:
+        self._conn.executescript(script)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SignalRepository
+# ---------------------------------------------------------------------------
+
+class SignalRepository:
+    """Single access point for all Influence Monitor DB operations.
+
+    Uses Turso (libsql_client) when TURSO_URL is configured; falls back to
+    a local SQLite file at ``settings.database_path_resolved`` otherwise.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._backend: _LibsqlBackend | _Sqlite3Backend
+        if settings.turso_url:
+            logger.info("Connecting to Turso at %s", settings.turso_url)
+            self._backend = _LibsqlBackend(
+                url=settings.turso_url,
+                auth_token=settings.turso_token or None,
+            )
+            self._is_libsql = True
+        else:
+            db_path = settings.database_path_resolved
+            logger.info("Using local SQLite at %s", db_path)
+            self._backend = _Sqlite3Backend(db_path)
+            self._is_libsql = False
 
     # ------------------------------------------------------------------
-    # Schema initialisation and seeding
+    # Low-level helpers
     # ------------------------------------------------------------------
 
-    async def init_schema(self) -> None:
+    def _execute(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+        return self._backend.execute(sql, params)
+
+    def _execute_write(self, sql: str, params: list[Any] | None = None) -> int | None:
+        """Execute a write statement; return lastrowid when available."""
+        if self._is_libsql:
+            self._backend.execute(sql, params)
+            return None
+        else:
+            assert isinstance(self._backend, _Sqlite3Backend)
+            return self._backend.execute_returning_lastrowid(sql, params)
+
+    def _executemany(self, sql: str, param_list: list[list[Any]]) -> None:
+        self._backend.executemany(sql, param_list)
+
+    def close(self) -> None:
+        self._backend.close()
+
+    # ------------------------------------------------------------------
+    # Schema initialisation
+    # ------------------------------------------------------------------
+
+    def init_schema(self) -> None:
         """Create all tables from schema.sql."""
         schema_sql = _SCHEMA_PATH.read_text()
-        await self.conn.executescript(schema_sql)
-        await self.conn.commit()
-        logger.info("Database schema initialised")
-
-    async def seed(self) -> None:
-        """Seed default tenant, investor profiles, and scoring weights from config files."""
-        await self._seed_tenant()
-        await self._seed_investor_profiles()
-        await self._seed_scoring_weights()
-        await self.conn.commit()
-        logger.info("Database seeding complete")
-
-    async def _seed_tenant(self) -> None:
-        await self.conn.execute(
-            "INSERT OR IGNORE INTO tenants (id, name) VALUES (1, 'default')"
-        )
-
-    async def _seed_investor_profiles(self) -> None:
-        investors = json.loads(_INVESTORS_SEED.read_text())
-        for inv in investors:
-            await self.conn.execute(
-                """INSERT INTO investor_profiles
-                   (tenant_id, name, x_handle, source_type, investor_type,
-                    credibility_score, is_active, notes)
-                   VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(tenant_id, x_handle) DO UPDATE SET
-                     name=excluded.name,
-                     investor_type=excluded.investor_type,
-                     credibility_score=excluded.credibility_score,
-                     is_active=excluded.is_active,
-                     notes=excluded.notes,
-                     updated_at=CURRENT_TIMESTAMP""",
-                (
-                    inv["name"],
-                    inv["x_handle"],
-                    inv["source_type"],
-                    inv["investor_type"],
-                    inv["credibility_score"],
-                    inv["is_active"],
-                    inv.get("notes", ""),
-                ),
-            )
-        logger.info("Seeded %d investor profiles", len(investors))
-
-    async def _seed_scoring_weights(self) -> None:
-        seed_data = json.loads(_WEIGHTS_SEED.read_text())
-        for w in seed_data["weights"]:
-            await self.conn.execute(
-                """INSERT OR IGNORE INTO scoring_weights
-                   (component, weight, description)
-                   VALUES (?, ?, ?)""",
-                (w["component"], w["weight"], w["description"]),
-            )
-        logger.info("Seeded %d scoring weights", len(seed_data["weights"]))
+        self._backend.executescript(schema_sql)
+        if not self._is_libsql:
+            assert isinstance(self._backend, _Sqlite3Backend)
+            self._backend.commit()
+        logger.info("Schema initialised")
 
     # ------------------------------------------------------------------
-    # Investor profiles
+    # Seeding
     # ------------------------------------------------------------------
 
-    async def get_investor_by_handle(self, handle: str) -> dict[str, Any] | None:
-        """Look up an active investor profile by X handle."""
-        cursor = await self.conn.execute(
-            "SELECT * FROM investor_profiles WHERE x_handle = ? AND is_active = 1",
-            (handle,),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
+    def seed(
+        self,
+        phone_e164: str = "",
+        tenant_id: int = 1,
+    ) -> None:
+        """Seed default tenant, user, accounts, and scoring_config."""
+        self._seed_tenant(tenant_id)
+        self._seed_user(phone_e164, tenant_id)
+        self._seed_accounts(tenant_id)
+        self._seed_scoring_config(tenant_id)
+        if not self._is_libsql:
+            assert isinstance(self._backend, _Sqlite3Backend)
+            self._backend.commit()
+        logger.info("Seeding complete")
 
-    async def upsert_investor_profile(
+    def _seed_tenant(self, tenant_id: int) -> None:
+        self._execute_write(
+            "INSERT OR IGNORE INTO tenants (id, name) VALUES (?, 'default')",
+            [tenant_id],
+        )
+
+    def _seed_user(self, phone_e164: str, tenant_id: int) -> None:
+        self._execute_write(
+            """INSERT OR IGNORE INTO users (id, tenant_id, phone_e164)
+               VALUES (1, ?, ?)""",
+            [tenant_id, phone_e164],
+        )
+
+    def _seed_accounts(self, tenant_id: int) -> None:
+        accounts = json.loads(_ACCOUNTS_SEED.read_text())
+        for acc in accounts:
+            self._execute_write(
+                """INSERT OR IGNORE INTO accounts
+                   (tenant_id, user_id, handle, display_name, angle,
+                    credibility_score, status, backup_rank, notes)
+                   VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    tenant_id,
+                    acc["handle"],
+                    acc["display_name"],
+                    acc["angle"],
+                    acc["credibility_score"],
+                    acc["status"],
+                    acc.get("backup_rank"),
+                    acc.get("notes", ""),
+                ],
+            )
+        logger.info("Seeded %d accounts", len(accounts))
+
+    def _seed_scoring_config(self, tenant_id: int) -> None:
+        config_rows = json.loads(_SCORING_CONFIG_SEED.read_text())
+        for row in config_rows:
+            self._execute_write(
+                """INSERT OR IGNORE INTO scoring_config
+                   (tenant_id, key, value, description)
+                   VALUES (?, ?, ?, ?)""",
+                [tenant_id, row["key"], row["value"], row.get("description", "")],
+            )
+        logger.info("Seeded %d scoring_config rows", len(config_rows))
+
+    # ------------------------------------------------------------------
+    # Accounts
+    # ------------------------------------------------------------------
+
+    def upsert_account(
         self,
         tenant_id: int,
-        name: str,
-        x_handle: str,
-        source_type: str,
-        investor_type: str,
-        credibility_score: float,
-        is_active: bool = True,
+        handle: str,
+        display_name: str | None = None,
+        angle: str | None = None,
+        credibility_score: float = 5.0,
+        status: str = "primary",
+        backup_rank: int | None = None,
         notes: str = "",
-    ) -> int:
-        """Insert or update an investor profile. Returns the row id."""
-        cursor = await self.conn.execute(
-            """INSERT INTO investor_profiles
-               (tenant_id, name, x_handle, source_type, investor_type,
-                credibility_score, is_active, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-                 name=excluded.name,
-                 x_handle=excluded.x_handle,
+    ) -> int | None:
+        """Insert or update an account row. Returns rowid on sqlite3 backend."""
+        return self._execute_write(
+            """INSERT INTO accounts
+               (tenant_id, user_id, handle, display_name, angle,
+                credibility_score, status, backup_rank, notes)
+               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(tenant_id, handle) DO UPDATE SET
+                 display_name=excluded.display_name,
+                 angle=excluded.angle,
                  credibility_score=excluded.credibility_score,
-                 is_active=excluded.is_active,
-                 notes=excluded.notes,
-                 updated_at=CURRENT_TIMESTAMP""",
-            (tenant_id, name, x_handle, source_type, investor_type,
-             credibility_score, is_active, notes),
+                 status=excluded.status,
+                 backup_rank=excluded.backup_rank,
+                 notes=excluded.notes""",
+            [tenant_id, handle, display_name, angle,
+             credibility_score, status, backup_rank, notes],
         )
-        await self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
 
-    async def update_investor_accuracy(
+    def update_account_failure(
         self,
-        investor_id: int,
-        rolling_accuracy_30d: float | None,
-        total_calls: int,
-        total_hits: int,
+        account_id: int,
+        last_failure_at: datetime | None = None,
     ) -> None:
-        """Update an investor's track record stats."""
-        await self.conn.execute(
-            """UPDATE investor_profiles
-               SET rolling_accuracy_30d = ?,
-                   total_calls = ?,
-                   total_hits = ?,
-                   updated_at = CURRENT_TIMESTAMP
+        """Increment consecutive_failures and record last_failure_at."""
+        ts = (last_failure_at or datetime.utcnow()).isoformat()
+        self._execute_write(
+            """UPDATE accounts
+               SET consecutive_failures = consecutive_failures + 1,
+                   last_failure_at = ?,
+                   last_fetch_status = 'error'
                WHERE id = ?""",
-            (rolling_accuracy_30d, total_calls, total_hits, investor_id),
+            [ts, account_id],
         )
-        await self.conn.commit()
 
-    async def get_active_investors(self, tenant_id: int = 1) -> list[dict[str, Any]]:
-        """Return all active investor profiles for a tenant."""
-        cursor = await self.conn.execute(
-            "SELECT * FROM investor_profiles WHERE tenant_id = ? AND is_active = 1",
-            (tenant_id,),
+    def reset_account_failures(self, account_id: int) -> None:
+        """Reset consecutive_failures to 0 after a successful fetch."""
+        self._execute_write(
+            """UPDATE accounts
+               SET consecutive_failures = 0,
+                   last_fetch_status = 'ok'
+               WHERE id = ?""",
+            [account_id],
         )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+
+    def rename_account_handle(
+        self,
+        account_id: int,
+        new_handle: str,
+    ) -> None:
+        """Update the handle in place (handle-resolution rename path)."""
+        self._execute_write(
+            "UPDATE accounts SET handle = ? WHERE id = ?",
+            [new_handle, account_id],
+        )
+        logger.info("Renamed account id=%d to handle=%s", account_id, new_handle)
+
+    def get_accounts_by_status(
+        self, status: str, tenant_id: int = 1
+    ) -> list[dict[str, Any]]:
+        """Return all accounts with the given status for a tenant."""
+        return self._execute(
+            "SELECT * FROM accounts WHERE status = ? AND tenant_id = ? ORDER BY backup_rank ASC NULLS LAST, id ASC",
+            [status, tenant_id],
+        )
 
     # ------------------------------------------------------------------
     # Posts
     # ------------------------------------------------------------------
 
-    async def insert_post(
+    def insert_post(
         self,
         tenant_id: int,
-        investor_id: int,
+        account_id: int,
         external_id: str,
         source_type: str,
         text: str,
@@ -208,548 +351,190 @@ class DatabaseRepository:
         reply_count: int | None = None,
         like_count: int | None = None,
         bookmark_count: int | None = None,
-        quote_tweet_id: str | None = None,
-        is_thread: bool = False,
-        thread_position: int | None = None,
-        hashtags: list[str] | None = None,
-        mentioned_users: list[str] | None = None,
-        url_links: list[str] | None = None,
-        media_type: str | None = None,
-        language: str = "en",
-        follower_count_at_post: int | None = None,
-        following_count_at_post: int | None = None,
         raw_payload: dict | None = None,
+        user_id: int = 1,
     ) -> int | None:
-        """Insert a post. Uses INSERT OR IGNORE for deduplication on external_id.
+        """Insert a post using INSERT OR IGNORE for dedup on (source_type, external_id).
 
-        Returns the row id on insert, or None if the post already exists.
+        Returns the rowid on insert, or None if the post already existed (sqlite3 only).
         """
-        cursor = await self.conn.execute(
+        return self._execute_write(
             """INSERT OR IGNORE INTO posts
-               (tenant_id, investor_id, external_id, source_type, text,
+               (tenant_id, user_id, account_id, external_id, source_type, text,
                 posted_at, fetched_at, view_count, repost_count, reply_count,
-                like_count, bookmark_count, quote_tweet_id, is_thread,
-                thread_position, hashtags, mentioned_users, url_links,
-                media_type, language, follower_count_at_post,
-                following_count_at_post, raw_payload)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                tenant_id, investor_id, external_id, source_type, text,
+                like_count, bookmark_count, raw_payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                tenant_id, user_id, account_id, external_id, source_type, text,
                 posted_at.isoformat(), fetched_at.isoformat(),
-                view_count, repost_count, reply_count, like_count,
-                bookmark_count, quote_tweet_id, is_thread, thread_position,
-                json.dumps(hashtags) if hashtags else None,
-                json.dumps(mentioned_users) if mentioned_users else None,
-                json.dumps(url_links) if url_links else None,
-                media_type, language, follower_count_at_post,
-                following_count_at_post,
+                view_count, repost_count, reply_count, like_count, bookmark_count,
                 json.dumps(raw_payload) if raw_payload else None,
-            ),
+            ],
         )
-        await self.conn.commit()
-        if cursor.lastrowid and cursor.rowcount > 0:
-            return cursor.lastrowid
-        return None
-
-    # ------------------------------------------------------------------
-    # Signals
-    # ------------------------------------------------------------------
-
-    async def insert_signal(self, **kwargs: Any) -> int:
-        """Insert a signal row. Accepts all signals columns as keyword args.
-
-        Required: tenant_id, post_id, investor_id, ticker,
-                  extraction_confidence, direction, signal_date.
-        """
-        columns = list(kwargs.keys())
-        placeholders = ", ".join("?" for _ in columns)
-        col_names = ", ".join(columns)
-        values = list(kwargs.values())
-
-        cursor = await self.conn.execute(
-            f"INSERT INTO signals ({col_names}) VALUES ({placeholders})",
-            values,
-        )
-        await self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
-
-    async def get_signals_for_date(
-        self, signal_date: date, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return all signals for a given date and tenant."""
-        cursor = await self.conn.execute(
-            """SELECT s.*, p.text AS post_text, ip.name AS investor_name,
-                      ip.x_handle, ip.credibility_score,
-                      ip.rolling_accuracy_30d, ip.total_calls, ip.total_hits
-               FROM signals s
-               JOIN posts p ON s.post_id = p.id
-               JOIN investor_profiles ip ON s.investor_id = ip.id
-               WHERE s.signal_date = ? AND s.tenant_id = ?
-               ORDER BY s.final_score DESC NULLS LAST""",
-            (signal_date.isoformat(), tenant_id),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_signals_for_scoring(
-        self, signal_date: date, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return morning-ranked signals that still need evening scoring.
-
-        Filters to signals where ``morning_rank IS NOT NULL`` (were in the
-        watchlist) and ``close_price IS NULL`` (not yet scored).  This
-        makes ``run_evening`` idempotent: re-running skips already-scored
-        signals.
-        """
-        cursor = await self.conn.execute(
-            """SELECT s.*, ip.name AS investor_name, ip.x_handle
-               FROM signals s
-               JOIN investor_profiles ip ON s.investor_id = ip.id
-               WHERE s.signal_date = ?
-                 AND s.tenant_id = ?
-                 AND s.morning_rank IS NOT NULL
-                 AND s.close_price IS NULL
-               ORDER BY s.morning_rank ASC""",
-            (signal_date.isoformat(), tenant_id),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-    async def compute_investor_rolling_accuracy(
-        self, investor_id: int, days: int = 30
-    ) -> tuple[int, int]:
-        """Return (total_calls, hits) for an investor over the last *days*.
-
-        Only counts signals where ``is_hit IS NOT NULL`` (price data was
-        available).  Used to update ``rolling_accuracy_30d``.
-        """
-        cursor = await self.conn.execute(
-            """SELECT
-                 COUNT(*) AS total_calls,
-                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS hits
-               FROM signals
-               WHERE investor_id = ?
-                 AND is_hit IS NOT NULL
-                 AND signal_date >= DATE(?, ?)""",
-            (investor_id, "now", f"-{days} days"),
-        )
-        row = await cursor.fetchone()
-        total = int(row["total_calls"]) if row and row["total_calls"] else 0
-        hits = int(row["hits"]) if row and row["hits"] else 0
-        return total, hits
-
-    async def get_investor_lifetime_stats(
-        self, investor_id: int
-    ) -> tuple[int, int]:
-        """Return lifetime (total_calls, total_hits) for an investor."""
-        cursor = await self.conn.execute(
-            """SELECT
-                 COUNT(*) AS total_calls,
-                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS hits
-               FROM signals
-               WHERE investor_id = ?
-                 AND is_hit IS NOT NULL""",
-            (investor_id,),
-        )
-        row = await cursor.fetchone()
-        total = int(row["total_calls"]) if row and row["total_calls"] else 0
-        hits = int(row["hits"]) if row and row["hits"] else 0
-        return total, hits
-
-    async def upsert_daily_summary(self, **kwargs: Any) -> int:
-        """Insert or update a daily pipeline run summary.
-
-        Idempotent: checks for an existing row with the same
-        ``(tenant_id, summary_date, run_type)`` and updates it if found,
-        inserts a new row otherwise.
-        """
-        tenant_id = kwargs.get("tenant_id", 1)
-        summary_date = kwargs.get("summary_date")
-        run_type = kwargs.get("run_type")
-
-        cursor = await self.conn.execute(
-            "SELECT id FROM daily_summaries "
-            "WHERE tenant_id = ? AND summary_date = ? AND run_type = ?",
-            (tenant_id, summary_date, run_type),
-        )
-        existing = await cursor.fetchone()
-
-        if existing:
-            row_id = existing["id"]
-            update_cols = [c for c in kwargs if c not in ("tenant_id", "summary_date", "run_type")]
-            set_clause = ", ".join(f"{c} = ?" for c in update_cols)
-            values = [kwargs[c] for c in update_cols] + [row_id]
-            await self.conn.execute(
-                f"UPDATE daily_summaries SET {set_clause} WHERE id = ?",
-                values,
-            )
-            await self.conn.commit()
-            return row_id
-
-        columns = list(kwargs.keys())
-        placeholders = ", ".join("?" for _ in columns)
-        col_names = ", ".join(columns)
-        values_list = list(kwargs.values())
-        cursor = await self.conn.execute(
-            f"INSERT INTO daily_summaries ({col_names}) VALUES ({placeholders})",
-            values_list,
-        )
-        await self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
-
-    async def update_signal_morning_rank(
-        self,
-        signal_id: int,
-        morning_rank: int,
-        corroboration_count: int,
-        corroboration_bonus: float,
-    ) -> None:
-        """Set morning_rank and corroboration fields after aggregation."""
-        await self.conn.execute(
-            """UPDATE signals
-               SET morning_rank = ?,
-                   corroboration_count = ?,
-                   corroboration_bonus = ?,
-                   final_score = composite_score * ?
-               WHERE id = ?""",
-            (morning_rank, corroboration_count, corroboration_bonus, corroboration_bonus, signal_id),
-        )
-        await self.conn.commit()
-
-    async def update_signal_index_tier(
-        self, signal_id: int, index_tier: str
-    ) -> None:
-        """Set index_tier on a signal after index resolution."""
-        await self.conn.execute(
-            "UPDATE signals SET index_tier = ? WHERE id = ?",
-            (index_tier, signal_id),
-        )
-        await self.conn.commit()
-
-    async def get_signals_awaiting_open_price(
-        self, signal_date: date, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return morning-ranked signals that still need an open price."""
-        cursor = await self.conn.execute(
-            """SELECT id, ticker, investor_id
-               FROM signals
-               WHERE signal_date = ?
-                 AND tenant_id = ?
-                 AND morning_rank IS NOT NULL
-                 AND open_price IS NULL""",
-            (signal_date.isoformat(), tenant_id),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_morning_watchlist(
-        self, signal_date: date, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return ranked signals for the morning watchlist email.
-
-        Filters to signals with ``morning_rank IS NOT NULL`` and orders
-        by ``morning_rank ASC``.  Joins post text and investor profile
-        so the renderer does not need additional queries.
-        """
-        cursor = await self.conn.execute(
-            """SELECT s.*, p.text AS post_text, p.deleted AS post_deleted,
-                      p.posted_at,
-                      ip.name AS investor_name,
-                      ip.x_handle, ip.credibility_score,
-                      ip.rolling_accuracy_30d, ip.total_calls, ip.total_hits
-               FROM signals s
-               JOIN posts p ON s.post_id = p.id
-               JOIN investor_profiles ip ON s.investor_id = ip.id
-               WHERE s.signal_date = ?
-                 AND s.tenant_id = ?
-                 AND s.morning_rank IS NOT NULL
-               ORDER BY s.morning_rank ASC""",
-            (signal_date.isoformat(), tenant_id),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_evening_scorecard_signals(
-        self, signal_date: date, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return morning-ranked signals for the evening scorecard.
-
-        Returns the same set as ``get_morning_watchlist`` but is named
-        separately because the caller's intent is post-market scoring
-        (``return_pct``, ``is_hit``, price columns are populated by this
-        point in the pipeline).  Includes investor name and handle for
-        the track record attribution row.
-        """
-        cursor = await self.conn.execute(
-            """SELECT s.*, p.text AS post_text, p.deleted AS post_deleted,
-                      p.posted_at,
-                      ip.name AS investor_name,
-                      ip.x_handle, ip.credibility_score,
-                      ip.rolling_accuracy_30d, ip.total_calls, ip.total_hits
-               FROM signals s
-               JOIN posts p ON s.post_id = p.id
-               JOIN investor_profiles ip ON s.investor_id = ip.id
-               WHERE s.signal_date = ?
-                 AND s.tenant_id = ?
-                 AND s.morning_rank IS NOT NULL
-               ORDER BY s.morning_rank ASC""",
-            (signal_date.isoformat(), tenant_id),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_running_stats(self, tenant_id: int = 1) -> dict[str, Any]:
-        """Aggregate track record stats across all scored signals.
-
-        Returns a dict with keys: ``total_scored``, ``total_hits``,
-        ``avg_gain_correct``, ``avg_loss_incorrect``,
-        ``corroborated_total``, ``corroborated_hits``.
-
-        Adjusted return used for gain/loss:
-        ``return_pct`` for LONG, ``-return_pct`` for SHORT.
-        """
-        cursor = await self.conn.execute(
-            """SELECT
-                 COUNT(*) AS total_scored,
-                 SUM(CASE WHEN is_hit = 1 THEN 1 ELSE 0 END) AS total_hits,
-                 AVG(CASE
-                       WHEN is_hit = 1 AND direction = 'LONG' THEN return_pct
-                       WHEN is_hit = 1 AND direction = 'SHORT' THEN -return_pct
-                       ELSE NULL
-                     END) AS avg_gain_correct,
-                 AVG(CASE
-                       WHEN is_hit = 0 AND direction = 'LONG' THEN return_pct
-                       WHEN is_hit = 0 AND direction = 'SHORT' THEN -return_pct
-                       ELSE NULL
-                     END) AS avg_loss_incorrect,
-                 SUM(CASE WHEN corroboration_count >= 2 THEN 1 ELSE 0 END)
-                     AS corroborated_total,
-                 SUM(CASE WHEN corroboration_count >= 2 AND is_hit = 1 THEN 1 ELSE 0 END)
-                     AS corroborated_hits
-               FROM signals
-               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
-            (tenant_id,),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else {}
-
-    async def get_trading_days_scored(self, tenant_id: int = 1) -> int:
-        """Count distinct trading days that have at least one scored signal."""
-        cursor = await self.conn.execute(
-            """SELECT COUNT(DISTINCT signal_date) AS day_count
-               FROM signals
-               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
-            (tenant_id,),
-        )
-        row = await cursor.fetchone()
-        return int(row["day_count"]) if row and row["day_count"] else 0
-
-    async def get_first_scored_date(self, tenant_id: int = 1) -> date | None:
-        """Return the earliest signal_date that has a scored signal."""
-        cursor = await self.conn.execute(
-            """SELECT MIN(signal_date) AS first_date
-               FROM signals
-               WHERE is_hit IS NOT NULL AND tenant_id = ?""",
-            (tenant_id,),
-        )
-        row = await cursor.fetchone()
-        if row and row["first_date"]:
-            return date.fromisoformat(row["first_date"])
-        return None
-
-    async def get_top_performer_month(
-        self, tenant_id: int = 1, min_calls: int = 3
-    ) -> dict[str, Any] | None:
-        """Return the investor with the highest hit rate in the last 30 days.
-
-        Only considers investors with at least *min_calls* scored signals
-        in the window.
-        """
-        cursor = await self.conn.execute(
-            """SELECT ip.name AS investor_name,
-                      ip.x_handle,
-                      COUNT(s.id) AS calls,
-                      SUM(CASE WHEN s.is_hit = 1 THEN 1 ELSE 0 END) AS hits
-               FROM signals s
-               JOIN investor_profiles ip ON s.investor_id = ip.id
-               WHERE s.is_hit IS NOT NULL
-                 AND s.tenant_id = ?
-                 AND s.signal_date >= DATE('now', '-30 days')
-               GROUP BY s.investor_id
-               HAVING calls >= ?
-               ORDER BY CAST(hits AS REAL) / calls DESC
-               LIMIT 1""",
-            (tenant_id, min_calls),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def update_signal_prices(
-        self,
-        signal_id: int,
-        open_price: float | None = None,
-        close_price: float | None = None,
-        high_price: float | None = None,
-        low_price: float | None = None,
-        prev_close_price: float | None = None,
-        return_pct: float | None = None,
-        is_hit: bool | None = None,
-    ) -> None:
-        """Update price-related fields on a signal."""
-        updates: list[str] = []
-        values: list[Any] = []
-        for col, val in [
-            ("open_price", open_price),
-            ("close_price", close_price),
-            ("high_price", high_price),
-            ("low_price", low_price),
-            ("prev_close_price", prev_close_price),
-            ("return_pct", return_pct),
-            ("is_hit", is_hit),
-        ]:
-            if val is not None:
-                updates.append(f"{col} = ?")
-                values.append(val)
-
-        if not updates:
-            return
-
-        values.append(signal_id)
-        await self.conn.execute(
-            f"UPDATE signals SET {', '.join(updates)} WHERE id = ?",
-            values,
-        )
-        await self.conn.commit()
-
-    async def update_signal_market_context(
-        self,
-        signal_id: int,
-        volume: int | None = None,
-        avg_volume_30d: int | None = None,
-        volume_ratio: float | None = None,
-        market_cap_at_signal: float | None = None,
-        sector: str | None = None,
-        industry: str | None = None,
-        sp500_return_pct: float | None = None,
-        vix_at_signal: float | None = None,
-        sector_return_pct: float | None = None,
-    ) -> None:
-        """Update market context fields on a signal."""
-        updates: list[str] = []
-        values: list[Any] = []
-        for col, val in [
-            ("volume", volume),
-            ("avg_volume_30d", avg_volume_30d),
-            ("volume_ratio", volume_ratio),
-            ("market_cap_at_signal", market_cap_at_signal),
-            ("sector", sector),
-            ("industry", industry),
-            ("sp500_return_pct", sp500_return_pct),
-            ("vix_at_signal", vix_at_signal),
-            ("sector_return_pct", sector_return_pct),
-        ]:
-            if val is not None:
-                updates.append(f"{col} = ?")
-                values.append(val)
-
-        if not updates:
-            return
-
-        values.append(signal_id)
-        await self.conn.execute(
-            f"UPDATE signals SET {', '.join(updates)} WHERE id = ?",
-            values,
-        )
-        await self.conn.commit()
-
-    # ------------------------------------------------------------------
-    # Multi-horizon return backfill
-    # ------------------------------------------------------------------
-
-    async def get_signals_pending_backfill(
-        self, column: str, cutoff_date: str, tenant_id: int = 1
-    ) -> list[dict[str, Any]]:
-        """Return signals where *column* IS NULL and signal_date <= cutoff_date.
-
-        *column* must be one of: return_5d, return_10d, return_30d.
-        Only signals with a stored open_price are returned (required for return computation).
-        """
-        _ALLOWED = {"return_5d", "return_10d", "return_30d"}
-        if column not in _ALLOWED:
-            raise ValueError(f"column must be one of {_ALLOWED}, got {column!r}")
-        rows = await self.conn.execute_fetchall(
-            f"""
-            SELECT id, ticker, signal_date, open_price
-            FROM signals
-            WHERE {column} IS NULL
-              AND open_price IS NOT NULL
-              AND signal_date <= ?
-              AND tenant_id = ?
-            ORDER BY signal_date ASC
-            """,
-            (cutoff_date, tenant_id),
-        )
-        return [dict(r) for r in rows]
-
-    async def update_signal_horizon_return(
-        self, signal_id: int, column: str, value: float
-    ) -> None:
-        """Set a single horizon return column on a signal (idempotent)."""
-        _ALLOWED = {"return_5d", "return_10d", "return_30d"}
-        if column not in _ALLOWED:
-            raise ValueError(f"column must be one of {_ALLOWED}, got {column!r}")
-        await self.conn.execute(
-            f"UPDATE signals SET {column} = ? WHERE id = ?",
-            (value, signal_id),
-        )
-        await self.conn.commit()
 
     # ------------------------------------------------------------------
     # Engagement snapshots
     # ------------------------------------------------------------------
 
-    async def insert_engagement_snapshot(
+    def insert_engagement_snapshot(
         self,
         post_id: int,
         view_count: int | None = None,
         repost_count: int | None = None,
         reply_count: int | None = None,
         like_count: int | None = None,
-        bookmark_count: int | None = None,
-    ) -> int:
+    ) -> int | None:
         """Insert an engagement snapshot for a post."""
-        cursor = await self.conn.execute(
+        return self._execute_write(
             """INSERT INTO engagement_snapshots
-               (post_id, view_count, repost_count, reply_count, like_count, bookmark_count)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (post_id, view_count, repost_count, reply_count, like_count, bookmark_count),
+               (post_id, view_count, repost_count, reply_count, like_count)
+               VALUES (?, ?, ?, ?, ?)""",
+            [post_id, view_count, repost_count, reply_count, like_count],
         )
-        await self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
-    # Daily summaries
+    # Retweeters
     # ------------------------------------------------------------------
 
-    async def insert_daily_summary(self, **kwargs: Any) -> int:
-        """Insert a daily pipeline run summary."""
+    def insert_retweeter(
+        self,
+        post_id: int,
+        retweeter_external_id: str,
+        retweeter_handle: str | None = None,
+        followers_count: int | None = None,
+        is_verified: bool = False,
+        is_monitored: bool = False,
+    ) -> int | None:
+        """Insert a retweeter row (INSERT OR IGNORE for dedup)."""
+        return self._execute_write(
+            """INSERT OR IGNORE INTO retweeters
+               (post_id, retweeter_external_id, retweeter_handle,
+                followers_count, is_verified, is_monitored)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [post_id, retweeter_external_id, retweeter_handle,
+             followers_count, is_verified, is_monitored],
+        )
+
+    # ------------------------------------------------------------------
+    # Signals
+    # ------------------------------------------------------------------
+
+    def insert_signal(self, **kwargs: Any) -> int | None:
+        """Insert a signal row. Accepts all signals columns as keyword args.
+
+        Required: tenant_id, post_id, account_id, ticker,
+                  extraction_confidence, direction, signal_date, tier.
+        """
         columns = list(kwargs.keys())
         placeholders = ", ".join("?" for _ in columns)
         col_names = ", ".join(columns)
         values = list(kwargs.values())
-
-        cursor = await self.conn.execute(
-            f"INSERT INTO daily_summaries ({col_names}) VALUES ({placeholders})",
+        return self._execute_write(
+            f"INSERT INTO signals ({col_names}) VALUES ({placeholders})",
             values,
         )
-        await self.conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
+
+    def update_signal_outcome(
+        self,
+        signal_id: int,
+        prev_close: float | None = None,
+        today_open: float | None = None,
+        today_close: float | None = None,
+        overnight_return: float | None = None,
+        tradeable_return: float | None = None,
+        spy_return: float | None = None,
+        stock_20d_vol: float | None = None,
+        excess_vol_score: float | None = None,
+        price_data_source: str | None = None,
+        outcome_fetched_at: datetime | None = None,
+    ) -> None:
+        """Populate outcome columns on an existing signal row."""
+        updates: list[str] = []
+        values: list[Any] = []
+        field_map = [
+            ("prev_close", prev_close),
+            ("today_open", today_open),
+            ("today_close", today_close),
+            ("overnight_return", overnight_return),
+            ("tradeable_return", tradeable_return),
+            ("spy_return", spy_return),
+            ("stock_20d_vol", stock_20d_vol),
+            ("excess_vol_score", excess_vol_score),
+            ("price_data_source", price_data_source),
+            ("outcome_fetched_at", outcome_fetched_at.isoformat() if outcome_fetched_at else None),
+        ]
+        for col, val in field_map:
+            if val is not None:
+                updates.append(f"{col} = ?")
+                values.append(val)
+        if not updates:
+            return
+        values.append(signal_id)
+        self._execute_write(
+            f"UPDATE signals SET {', '.join(updates)} WHERE id = ?",
+            values,
+        )
+
+    def get_signals_for_date(
+        self,
+        signal_date: date,
+        tenant_id: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return all signals for a given date and tenant."""
+        return self._execute(
+            """SELECT s.*, a.handle AS account_handle, a.display_name AS account_display_name,
+                      a.credibility_score AS account_credibility
+               FROM signals s
+               JOIN accounts a ON s.account_id = a.id
+               WHERE s.signal_date = ? AND s.tenant_id = ?
+               ORDER BY s.final_score DESC""",
+            [signal_date.isoformat(), tenant_id],
+        )
 
     # ------------------------------------------------------------------
-    # API usage logging
+    # Scoring config
     # ------------------------------------------------------------------
 
-    async def log_api_usage(
+    def get_scoring_config(self, tenant_id: int = 1) -> dict[str, float]:
+        """Return all scoring_config rows as {key: value}."""
+        rows = self._execute(
+            "SELECT key, value FROM scoring_config WHERE tenant_id = ?",
+            [tenant_id],
+        )
+        return {r["key"]: r["value"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Messages sent
+    # ------------------------------------------------------------------
+
+    def log_message_sent(
+        self,
+        kind: str,
+        delivery: str,
+        status: str,
+        body_preview: str | None = None,
+        provider_id: str | None = None,
+        error_message: str | None = None,
+        tenant_id: int = 1,
+        user_id: int = 1,
+        sent_at: datetime | None = None,
+    ) -> int | None:
+        """Log a WhatsApp delivery attempt."""
+        ts = (sent_at or datetime.utcnow()).isoformat()
+        return self._execute_write(
+            """INSERT INTO messages_sent
+               (tenant_id, user_id, kind, sent_at, delivery, status,
+                body_preview, provider_id, error_message)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [tenant_id, user_id, kind, ts, delivery, status,
+             body_preview, provider_id, error_message],
+        )
+
+    # ------------------------------------------------------------------
+    # API usage
+    # ------------------------------------------------------------------
+
+    def log_api_usage(
         self,
         provider: str,
         endpoint: str | None = None,
@@ -760,139 +545,69 @@ class DatabaseRepository:
         error_message: str | None = None,
     ) -> None:
         """Log an external API call for cost monitoring."""
-        await self.conn.execute(
+        self._execute_write(
             """INSERT INTO api_usage
                (provider, endpoint, input_tokens, output_tokens,
                 latency_ms, status, error_message)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (provider, endpoint, input_tokens, output_tokens,
-             latency_ms, status, error_message),
+            [provider, endpoint, input_tokens, output_tokens,
+             latency_ms, status, error_message],
         )
-        await self.conn.commit()
 
     # ------------------------------------------------------------------
-    # Scoring weights
+    # Daily summaries
     # ------------------------------------------------------------------
 
-    async def get_scoring_weights(self) -> dict[str, float]:
-        """Return scoring weights as {component: weight}."""
-        cursor = await self.conn.execute(
-            "SELECT component, weight FROM scoring_weights"
-        )
-        rows = await cursor.fetchall()
-        return {row["component"]: row["weight"] for row in rows}
+    def upsert_daily_summary(self, **kwargs: Any) -> int | None:
+        """Insert or update a daily pipeline run summary (idempotent).
 
-    # ------------------------------------------------------------------
-    # Index membership
-    # ------------------------------------------------------------------
-
-    async def get_index_membership(self, ticker: str) -> dict[str, Any] | None:
-        """Look up cached index membership for a ticker."""
-        cursor = await self.conn.execute(
-            "SELECT ticker, index_tier, market_cap_b, last_updated "
-            "FROM index_membership WHERE ticker = ?",
-            (ticker.upper(),),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def upsert_index_membership(
-        self,
-        ticker: str,
-        index_tier: str,
-        market_cap_b: float | None = None,
-    ) -> None:
-        """Insert or update a single index membership entry."""
-        await self.conn.execute(
-            """INSERT INTO index_membership (ticker, index_tier, market_cap_b, last_updated)
-               VALUES (?, ?, ?, DATE('now'))
-               ON CONFLICT(ticker) DO UPDATE SET
-                   index_tier = excluded.index_tier,
-                   market_cap_b = excluded.market_cap_b,
-                   last_updated = excluded.last_updated""",
-            (ticker.upper(), index_tier, market_cap_b),
-        )
-        await self.conn.commit()
-
-    async def bulk_upsert_index_membership_if_stale(
-        self,
-        entries: list[tuple[str, str]],
-        ttl_days: int = 7,
-    ) -> int:
-        """Bulk upsert index membership, skipping entries still fresh.
-
-        Each entry is ``(ticker, index_tier)``.  New tickers are always
-        inserted; existing tickers are only updated when their
-        ``last_updated`` is older than *ttl_days*.
+        Unique constraint is (tenant_id, summary_date, run_type).
         """
-        await self.conn.executemany(
-            """INSERT INTO index_membership (ticker, index_tier, last_updated)
-               VALUES (?, ?, DATE('now'))
-               ON CONFLICT(ticker) DO UPDATE SET
-                   index_tier = excluded.index_tier,
-                   last_updated = excluded.last_updated
-               WHERE julianday('now') - julianday(index_membership.last_updated) >= ?""",
-            [(ticker.upper(), tier, ttl_days) for ticker, tier in entries],
+        columns = list(kwargs.keys())
+        placeholders = ", ".join("?" for _ in columns)
+        col_names = ", ".join(columns)
+        values = list(kwargs.values())
+        update_cols = [c for c in columns if c not in ("tenant_id", "summary_date", "run_type")]
+        update_clause = ", ".join(f"{c}=excluded.{c}" for c in update_cols)
+        return self._execute_write(
+            f"""INSERT INTO daily_summaries ({col_names}) VALUES ({placeholders})
+                ON CONFLICT(tenant_id, summary_date, run_type) DO UPDATE SET {update_clause}""",
+            values,
         )
-        await self.conn.commit()
-        return len(entries)
-
-    async def get_stale_index_entries(self, days: int = 7) -> list[dict[str, Any]]:
-        """Return all index_membership rows older than *days*."""
-        cursor = await self.conn.execute(
-            """SELECT ticker, index_tier, market_cap_b, last_updated
-               FROM index_membership
-               WHERE julianday('now') - julianday(last_updated) >= ?""",
-            (days,),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
 
 
-# ------------------------------------------------------------------
-# CLI entry point: python -m influence_monitor.db.repository --init
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# CLI: python -m influence_monitor.db.repository --init
+# ---------------------------------------------------------------------------
 
-async def _async_main() -> None:
+def main() -> None:
     import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if "--init" not in sys.argv:
         print("Usage: python -m influence_monitor.db.repository --init")
         sys.exit(1)
 
     settings = Settings()
-    repo = DatabaseRepository(settings)
-    await repo.connect()
+    repo = SignalRepository(settings)
     try:
-        await repo.init_schema()
-        await repo.seed()
+        repo.init_schema()
+        repo.seed(phone_e164=settings.recipient_phone_e164)
 
-        # Verify seeding
-        cursor = await repo.conn.execute("SELECT COUNT(*) AS cnt FROM investor_profiles")
-        row = await cursor.fetchone()
-        investor_count = row["cnt"] if row else 0
-
-        cursor = await repo.conn.execute("SELECT COUNT(*) AS cnt FROM scoring_weights")
-        row = await cursor.fetchone()
-        weight_count = row["cnt"] if row else 0
-
-        logger.info(
-            "Verification: %d investor profiles, %d scoring weights",
-            investor_count,
-            weight_count,
+        # Verification
+        rows = repo._execute(
+            "SELECT status, COUNT(*) AS cnt FROM accounts GROUP BY status"
         )
-        print(f"Database initialised at {settings.database_path}")
-        print(f"  investor_profiles: {investor_count}")
-        print(f"  scoring_weights:   {weight_count}")
+        for r in rows:
+            print(f"  accounts[status={r['status']}]: {r['cnt']}")
+
+        cfg_count = repo._execute("SELECT COUNT(*) AS cnt FROM scoring_config")
+        print(f"  scoring_config rows: {cfg_count[0]['cnt']}")
+
+        print(f"\nDatabase initialised at: {settings.database_path}")
     finally:
-        await repo.close()
-
-
-def main() -> None:
-    import asyncio
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    asyncio.run(_async_main())
+        repo.close()
 
 
 if __name__ == "__main__":

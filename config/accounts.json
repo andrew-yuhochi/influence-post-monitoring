@@ -1,1 +1,407 @@
-[]
+[
+  {
+    "handle": "BillAckman",
+    "display_name": "Bill Ackman",
+    "angle": "Activist",
+    "credibility_score": 9,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "PoC catalyst; ~1.4M followers"
+  },
+  {
+    "handle": "Carl_C_Icahn",
+    "display_name": "Carl Icahn",
+    "angle": "Activist",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Less frequent but high-impact"
+  },
+  {
+    "handle": "DanielSLoeb1",
+    "display_name": "Daniel Loeb",
+    "angle": "Activist",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Third Point activist letters"
+  },
+  {
+    "handle": "jessecohn4",
+    "display_name": "Jesse Cohn",
+    "angle": "Activist",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Elliott Mgmt activist"
+  },
+  {
+    "handle": "StarboardValue",
+    "display_name": "Jeffrey Smith",
+    "angle": "Activist",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Starboard activist campaigns"
+  },
+  {
+    "handle": "TruthGundlach",
+    "display_name": "Jeffrey Gundlach",
+    "angle": "Macro",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "DoubleLine macro/rates"
+  },
+  {
+    "handle": "RayDalio",
+    "display_name": "Ray Dalio",
+    "angle": "Macro",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Bridgewater founder"
+  },
+  {
+    "handle": "AndurandPierre",
+    "display_name": "Pierre Andurand",
+    "angle": "Macro",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Oil/commodities macro"
+  },
+  {
+    "handle": "Scaramucci",
+    "display_name": "Anthony Scaramucci",
+    "angle": "Macro",
+    "credibility_score": 5,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "SkyBridge; political noise filter applied"
+  },
+  {
+    "handle": "DavidTepper",
+    "display_name": "David Tepper",
+    "angle": "Macro",
+    "credibility_score": 9,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Appaloosa; infrequent but moves markets"
+  },
+  {
+    "handle": "davidein",
+    "display_name": "David Einhorn",
+    "angle": "Value",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Greenlight Capital"
+  },
+  {
+    "handle": "michaeljburry",
+    "display_name": "Michael Burry",
+    "angle": "Value/Short",
+    "credibility_score": 9,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Deletes posts within hours — 2h polling essential"
+  },
+  {
+    "handle": "GavinSBaker",
+    "display_name": "Gavin Baker",
+    "angle": "Value",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Atreides Mgmt"
+  },
+  {
+    "handle": "rsandler21969",
+    "display_name": "Ricky Sandler",
+    "angle": "Value",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Eminence Capital"
+  },
+  {
+    "handle": "HaydenCapital",
+    "display_name": "Fred Liu",
+    "angle": "Value",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Hayden Capital"
+  },
+  {
+    "handle": "WallStCynic",
+    "display_name": "Jim Chanos",
+    "angle": "Short",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Long-time short seller; Kynikos"
+  },
+  {
+    "handle": "carsonblock",
+    "display_name": "Carson Block",
+    "angle": "Short",
+    "credibility_score": 8,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Muddy Waters; high-impact reports"
+  },
+  {
+    "handle": "andrew_left",
+    "display_name": "Andrew Left",
+    "angle": "Short",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Citron Research; reduced activity post-2024 SEC action"
+  },
+  {
+    "handle": "StockJabber",
+    "display_name": "Edwin Dorsey",
+    "angle": "Short",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "The Bear Cave newsletter"
+  },
+  {
+    "handle": "ToffCap",
+    "display_name": "ToffCap",
+    "angle": "Short",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Activist short reports"
+  },
+  {
+    "handle": "CathieWood",
+    "display_name": "Cathie Wood",
+    "angle": "Tech",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "ARK Invest; daily commentary"
+  },
+  {
+    "handle": "chamath",
+    "display_name": "Chamath Palihapitiya",
+    "angle": "Tech",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "All-In Podcast; active"
+  },
+  {
+    "handle": "altcap",
+    "display_name": "Brad Gerstner",
+    "angle": "Tech",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Altimeter Capital"
+  },
+  {
+    "handle": "plaffont",
+    "display_name": "Philippe Laffont",
+    "angle": "Tech",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Coatue Management"
+  },
+  {
+    "handle": "Yardeni",
+    "display_name": "Ed Yardeni",
+    "angle": "Strategist",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Yardeni Research"
+  },
+  {
+    "handle": "MikeWilson_MS",
+    "display_name": "Mike Wilson",
+    "angle": "Strategist",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Morgan Stanley CIO"
+  },
+  {
+    "handle": "ReformedBroker",
+    "display_name": "Josh Brown",
+    "angle": "Strategist",
+    "credibility_score": 5,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Ritholtz Wealth; educational angle"
+  },
+  {
+    "handle": "ritholtz",
+    "display_name": "Barry Ritholtz",
+    "angle": "Strategist",
+    "credibility_score": 5,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Ritholtz Wealth"
+  },
+  {
+    "handle": "Greenbackd",
+    "display_name": "Tobias Carlisle",
+    "angle": "Strategist/Value",
+    "credibility_score": 6,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Acquirer's Fund"
+  },
+  {
+    "handle": "Citrini7",
+    "display_name": "Citrini",
+    "angle": "Strategist",
+    "credibility_score": 7,
+    "status": "primary",
+    "backup_rank": null,
+    "notes": "Thematic / macro calls"
+  },
+  {
+    "handle": "AltaFoxCapital",
+    "display_name": "Connor Haley",
+    "angle": "Value/Small-cap",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 1,
+    "notes": "Alta Fox"
+  },
+  {
+    "handle": "hkuppy",
+    "display_name": "Harris Kupperman",
+    "angle": "Value",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 2,
+    "notes": "Praetorian Capital"
+  },
+  {
+    "handle": "convertbond",
+    "display_name": "Lawrence McDonald",
+    "angle": "Macro/Credit",
+    "credibility_score": 7,
+    "status": "backup",
+    "backup_rank": 3,
+    "notes": "Bear Traps Report"
+  },
+  {
+    "handle": "profplum99",
+    "display_name": "Mike Green",
+    "angle": "Macro",
+    "credibility_score": 7,
+    "status": "backup",
+    "backup_rank": 4,
+    "notes": "Passive-flow thesis"
+  },
+  {
+    "handle": "DiMartinoBooth",
+    "display_name": "Danielle DiMartino Booth",
+    "angle": "Macro",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 5,
+    "notes": "QI Research"
+  },
+  {
+    "handle": "jessefelder",
+    "display_name": "Jesse Felder",
+    "angle": "Macro/Value",
+    "credibility_score": 7,
+    "status": "backup",
+    "backup_rank": 6,
+    "notes": "The Felder Report"
+  },
+  {
+    "handle": "BillBrewsterTBB",
+    "display_name": "Bill Brewster",
+    "angle": "Value",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 7,
+    "notes": "Sullimar Capital"
+  },
+  {
+    "handle": "KerrisdaleCap",
+    "display_name": "Kerrisdale Capital",
+    "angle": "Short",
+    "credibility_score": 7,
+    "status": "backup",
+    "backup_rank": 8,
+    "notes": "Short activist reports"
+  },
+  {
+    "handle": "sprucepointcap",
+    "display_name": "Spruce Point Capital",
+    "angle": "Short",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 9,
+    "notes": "Short research"
+  },
+  {
+    "handle": "iancassel",
+    "display_name": "Ian Cassel",
+    "angle": "Small-cap Value",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 10,
+    "notes": "MicroCapClub"
+  },
+  {
+    "handle": "NKoppikar",
+    "display_name": "Nate Koppikar",
+    "angle": "Short",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 11,
+    "notes": "Orso Partners"
+  },
+  {
+    "handle": "RagingVentures",
+    "display_name": "Bill Martin",
+    "angle": "Small-cap",
+    "credibility_score": 5,
+    "status": "backup",
+    "backup_rank": 12,
+    "notes": "Raging Capital"
+  },
+  {
+    "handle": "AsianCenturyStk",
+    "display_name": "Michael Fritzell",
+    "angle": "EM/Asia",
+    "credibility_score": 5,
+    "status": "backup",
+    "backup_rank": 13,
+    "notes": "Asian Century Stocks"
+  },
+  {
+    "handle": "wolfejosh",
+    "display_name": "Josh Wolfe",
+    "angle": "Tech",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 14,
+    "notes": "Lux Capital; deep tech/frontier tech angle"
+  },
+  {
+    "handle": "MarkYusko",
+    "display_name": "Mark Yusko",
+    "angle": "Macro/Alternative",
+    "credibility_score": 6,
+    "status": "backup",
+    "backup_rank": 15,
+    "notes": "Morgan Creek Capital; macro + alternatives angle"
+  }
+]
