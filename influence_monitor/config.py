@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     twikit_username: str = ""
     twikit_email: str = ""
     twikit_password: str = ""
+    twitter_username: str = ""
+    twitter_email: str = ""
+    twitter_password: str = ""
 
     # WhatsApp — Twilio (primary delivery)
     twilio_account_sid: str = ""
@@ -34,6 +37,11 @@ class Settings(BaseSettings):
     turso_url: str = ""              # libsql://<db>.turso.io  (empty = local SQLite)
     turso_token: str = ""
     database_path: str = "data/signals.db"
+
+    # Email delivery
+    resend_api_key: str = ""
+    sender_email: str = ""
+    recipient_email: str = ""
 
     # Market data
     alpha_vantage_api_key: str = ""
@@ -54,6 +62,11 @@ class Settings(BaseSettings):
     evening_send_et: str = "16:45"
     virality_views_threshold: int = 50000
     virality_reposts_threshold: int = 500
+    corroboration_multiplier: float = 1.5
+    conviction_min: int = 3
+    signal_min_score: float = 5.0
+    top_n_signals: int = 5
+    track_record_min_calls: int = 5
     scorecard_min_days: int = 20
     timezone: str = "America/New_York"
     log_level: str = "INFO"
