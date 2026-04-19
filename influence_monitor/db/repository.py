@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -292,7 +292,7 @@ class SignalRepository:
         last_failure_at: datetime | None = None,
     ) -> None:
         """Increment consecutive_failures and record last_failure_at."""
-        ts = (last_failure_at or datetime.utcnow()).isoformat()
+        ts = (last_failure_at or datetime.now(tz=timezone.utc)).isoformat()
         self._execute_write(
             """UPDATE accounts
                SET consecutive_failures = consecutive_failures + 1,
@@ -520,7 +520,7 @@ class SignalRepository:
         sent_at: datetime | None = None,
     ) -> int | None:
         """Log a WhatsApp delivery attempt."""
-        ts = (sent_at or datetime.utcnow()).isoformat()
+        ts = (sent_at or datetime.now(tz=timezone.utc)).isoformat()
         return self._execute_write(
             """INSERT INTO messages_sent
                (tenant_id, user_id, kind, sent_at, delivery, status,
@@ -608,6 +608,10 @@ def main() -> None:
         print(f"\nDatabase initialised at: {settings.database_path}")
     finally:
         repo.close()
+
+
+# backward-compat alias
+DatabaseRepository = SignalRepository
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 -- User registry (single user at PoC; ready for multi-tenant Beta)
 CREATE TABLE IF NOT EXISTS users (
     id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL DEFAULT 1,
     tenant_id   INTEGER NOT NULL DEFAULT 1,
     phone_e164  TEXT NOT NULL,
     timezone    TEXT NOT NULL DEFAULT 'America/Toronto',
