@@ -6,7 +6,7 @@ Validates:
 - accounts table has consecutive_failures and last_failure_at columns
 - posts UNIQUE constraint on (source_type, external_id)
 - signals has every factor column and outcome column
-- Seeding: 30 primaries, 15 backups, 17 scoring_config rows
+- Seeding: 30 primaries, 15 backups, 19 scoring_config rows
 - Repository CRUD methods
 - Backend falls back to sqlite3 when TURSO_URL is unset
 - Fixture files exist and have the required shape
@@ -299,11 +299,11 @@ def test_seed_accounts_backup_count(seeded_repo: SignalRepository) -> None:
 
 
 def test_seed_scoring_config_count(seeded_repo: SignalRepository) -> None:
-    """After seeding: SELECT COUNT(*) FROM scoring_config = 17."""
+    """After seeding: SELECT COUNT(*) FROM scoring_config = 19."""
     rows = seeded_repo._execute(
         "SELECT COUNT(*) AS cnt FROM scoring_config"
     )
-    assert rows[0]["cnt"] == 17, f"Expected 17 scoring_config rows, got {rows[0]['cnt']}"
+    assert rows[0]["cnt"] == 19, f"Expected 19 scoring_config rows, got {rows[0]['cnt']}"
 
 
 def test_seed_total_accounts_is_45(seeded_repo: SignalRepository) -> None:
@@ -590,10 +590,10 @@ def test_update_signal_outcome(tmp_path: Path) -> None:
 
 
 def test_get_scoring_config_returns_dict(seeded_repo: SignalRepository) -> None:
-    """get_scoring_config returns a {key: float} dict with at least 17 entries."""
+    """get_scoring_config returns a {key: float} dict with at least 19 entries."""
     config = seeded_repo.get_scoring_config(tenant_id=1)
     assert isinstance(config, dict)
-    assert len(config) >= 17
+    assert len(config) >= 19
 
 
 def test_log_message_sent(tmp_path: Path) -> None:
@@ -850,10 +850,10 @@ def test_scoring_config_seed_exists() -> None:
     assert path.exists(), f"scoring_config_seed.json not found at {path}"
 
 
-def test_scoring_config_seed_has_17_rows() -> None:
-    """config/scoring_config_seed.json must have exactly 17 rows."""
+def test_scoring_config_seed_has_19_rows() -> None:
+    """config/scoring_config_seed.json must have exactly 19 rows."""
     data = json.loads((CONFIG_DIR / "scoring_config_seed.json").read_text())
-    assert len(data) == 17, f"Expected 17 scoring_config rows, got {len(data)}"
+    assert len(data) == 19, f"Expected 19 scoring_config rows, got {len(data)}"
 
 
 def test_scoring_config_seed_all_have_key_and_value() -> None:

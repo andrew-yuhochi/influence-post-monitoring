@@ -83,5 +83,15 @@
     "key": "liq_micro",
     "value": 1.3,
     "description": "F5 liquidity modifier for Micro/OTC stocks (below $300M)"
+  },
+  {
+    "key": "amplifier_high_follower_tier",
+    "value": 100000,
+    "description": "Minimum follower count to qualify as a high-tier retweeter (F4 amplifier formula)"
+  },
+  {
+    "key": "amplifier_mid_follower_tier",
+    "value": 10000,
+    "description": "Minimum follower count to qualify as a mid-tier retweeter (F4 amplifier formula)"
   }
 ]

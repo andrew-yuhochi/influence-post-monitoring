@@ -421,6 +421,63 @@ class SignalRepository:
         )
 
     # ------------------------------------------------------------------
+    # Price cache (market-cap resolver — weekly TTL)
+    # ------------------------------------------------------------------
+
+    def get_cached_market_cap(self, ticker: str) -> dict | None:
+        """Return a price_cache row if it exists and was updated within 7 days.
+
+        Returns the full row as a dict (keys: ticker, market_cap_b, market_cap_class,
+        sector, industry, last_updated), or None on cache miss / stale entry.
+        """
+        rows = self._execute(
+            """SELECT ticker, market_cap_b, market_cap_class, sector, industry, last_updated
+               FROM price_cache
+               WHERE ticker = ?
+                 AND last_updated >= datetime('now', '-7 days')""",
+            [ticker.upper()],
+        )
+        return rows[0] if rows else None
+
+    def upsert_price_cache(
+        self,
+        ticker: str,
+        market_cap_b: float | None,
+        market_cap_class: str,
+        sector: str | None,
+        industry: str | None,
+    ) -> None:
+        """Insert or replace a price_cache row, stamping last_updated to now."""
+        self._execute_write(
+            """INSERT INTO price_cache
+               (ticker, market_cap_b, market_cap_class, sector, industry, last_updated)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(ticker) DO UPDATE SET
+                 market_cap_b=excluded.market_cap_b,
+                 market_cap_class=excluded.market_cap_class,
+                 sector=excluded.sector,
+                 industry=excluded.industry,
+                 last_updated=excluded.last_updated""",
+            [ticker.upper(), market_cap_b, market_cap_class, sector, industry],
+        )
+
+    # ------------------------------------------------------------------
+    # Accounts — helper for amplifier cross-reference
+    # ------------------------------------------------------------------
+
+    def get_account_external_ids(self, tenant_id: int = 1) -> set[str]:
+        """Return the set of external_ids for all accounts (any status) in a tenant.
+
+        Used by AmplifierFetcher to flag retweeters that are monitored accounts.
+        Only non-NULL external_ids are returned.
+        """
+        rows = self._execute(
+            "SELECT external_id FROM accounts WHERE tenant_id = ? AND external_id IS NOT NULL",
+            [tenant_id],
+        )
+        return {r["external_id"] for r in rows}
+
+    # ------------------------------------------------------------------
     # Signals
     # ------------------------------------------------------------------
 
