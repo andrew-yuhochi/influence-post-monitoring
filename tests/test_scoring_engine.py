@@ -1,22 +1,72 @@
-"""Unit tests for ScoringEngine — composite score computation."""
+"""Unit tests for the new F1–F5 ScoringEngine, ConflictResolver, and SignalClassifier.
+
+Covers TASK-008 acceptance criteria:
+- Single post scoring: all sub-scores computed, weights applied
+- conviction_level < 2 → UNSCORED
+- direction "AMBIGUOUS" → UNSCORED
+- Same-poster repeat: highest virality retained
+- Same-poster flip: direction_flip=True, penalty logic
+- 3-poster mixed direction: conflict_group='opposing_exists'
+- ACT_NOW threshold crossing (views >= threshold)
+- WATCH threshold (below views, above vel floor)
+- All weights DB-driven (mock get_scoring_config)
+"""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+
 import pytest
 
+from influence_monitor.ingestion.base import RawPost
 from influence_monitor.scoring.llm_client import PostScore
-from influence_monitor.scoring.scoring_engine import ScoredSignal, ScoringEngine
+from influence_monitor.scoring.scoring_engine import (
+    ConflictResolver,
+    ScoredSignal,
+    ScoringEngine,
+    ScoringInput,
+    SignalClassifier,
+    _compute_f2a,
+    _compute_f2b,
+    _compute_f3,
+)
+
+
+# ---------------------------------------------------------------------------
+# Test configuration and seed values matching scoring_config_seed.json
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CONFIG: dict[str, float] = {
+    "weight_credibility": 0.25,
+    "weight_virality_abs": 0.35,
+    "weight_virality_vel": 0.15,
+    "weight_consensus": 0.25,
+    "weight_amplifier": 0.20,
+    "virality_views_threshold": 50_000.0,
+    "virality_reposts_threshold": 500.0,
+    "watch_velocity_floor": 1_000.0,
+    "direction_flip_penalty": 0.0,
+}
+
+_WINDOW_START = datetime(2026, 4, 21, 6, 30, 0, tzinfo=timezone.utc)
+_POSTED_AT = datetime(2026, 4, 20, 22, 0, 0, tzinfo=timezone.utc)  # 8.5h before window
+
+
+def _make_repo(config: dict[str, float] | None = None) -> MagicMock:
+    repo = MagicMock()
+    repo.get_scoring_config.return_value = config or dict(_DEFAULT_CONFIG)
+    return repo
 
 
 def _make_post_score(
     direction: str = "LONG",
     conviction_level: int = 4,
     argument_quality: str = "HIGH",
-    **kwargs,
+    tickers: list[str] | None = None,
 ) -> PostScore:
-    """Helper to create a PostScore with sensible defaults."""
-    defaults = dict(
-        tickers=["FNMA"],
+    return PostScore(
+        tickers=tickers or ["AAPL"],
         direction=direction,
         conviction_level=conviction_level,
         key_claim="test claim",
@@ -25,283 +75,607 @@ def _make_post_score(
         market_moving_potential=True,
         rationale="test rationale",
     )
-    defaults.update(kwargs)
-    return PostScore(**defaults)
 
 
-# Default scoring context for a credible investor
-_DEFAULT_CTX = dict(
-    credibility_score=8.5,
-    rolling_accuracy_30d=0.65,
-    view_count=50_000,
-    repost_count=500,
-    max_engagement_30d=100_000.0,
-)
+def _make_raw_post(
+    views: int | None = 60_000,
+    reposts: int | None = 600,
+    handle: str = "poster_a",
+) -> RawPost:
+    return RawPost(
+        source_type="twitter_twikit",
+        external_id="ext_001",
+        author_handle=handle,
+        author_external_id="uid_001",
+        text="test post",
+        posted_at=_POSTED_AT,
+        fetched_at=_WINDOW_START,
+        view_count=views,
+        repost_count=reposts,
+    )
 
 
-class TestZeroOutGate:
-    """conviction < 2 or NEUTRAL/AMBIGUOUS → composite_score = 0.0."""
+def _make_input(
+    ticker: str = "AAPL",
+    direction: str = "LONG",
+    conviction_level: int = 4,
+    views: int | None = 60_000,
+    reposts: int | None = 600,
+    credibility: float = 8.0,
+    handle: str = "poster_a",
+    distinct_same: int = 1,
+    total_distinct: int = 1,
+    posted_at: datetime = _POSTED_AT,
+) -> ScoringInput:
+    return ScoringInput(
+        post_score=_make_post_score(direction=direction, conviction_level=conviction_level),
+        raw_post=_make_raw_post(views=views, reposts=reposts, handle=handle),
+        account_credibility=credibility,
+        posted_at=posted_at,
+        collection_window_start=_WINDOW_START,
+        account_handle=handle,
+        distinct_same_direction_posters=distinct_same,
+        total_distinct_posters_on_ticker=total_distinct,
+        ticker=ticker,
+    )
 
-    def test_neutral_direction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(direction="NEUTRAL", conviction_level=3),
-            **_DEFAULT_CTX,
-        )
-        assert result.composite_score == 0.0
 
-    def test_ambiguous_direction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(direction="AMBIGUOUS", conviction_level=4),
-            **_DEFAULT_CTX,
-        )
-        assert result.composite_score == 0.0
+# ---------------------------------------------------------------------------
+# Sub-score unit tests
+# ---------------------------------------------------------------------------
 
-    def test_low_conviction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(conviction_level=1),
-            **_DEFAULT_CTX,
-        )
-        assert result.composite_score == 0.0
 
-    def test_zero_conviction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(conviction_level=0, direction="AMBIGUOUS"),
-            **_DEFAULT_CTX,
-        )
-        assert result.composite_score == 0.0
+class TestComputeF2a:
+    def test_at_threshold(self) -> None:
+        assert _compute_f2a(50_000, 0, 50_000, 500) == 1.0
+
+    def test_above_threshold_capped(self) -> None:
+        assert _compute_f2a(100_000, 0, 50_000, 500) == 1.0
+
+    def test_half_threshold(self) -> None:
+        assert abs(_compute_f2a(25_000, 0, 50_000, 500) - 0.5) < 0.001
+
+    def test_reposts_drives_score(self) -> None:
+        # reposts at threshold: score = 1.0 even if views = 0
+        assert _compute_f2a(0, 500, 50_000, 500) == 1.0
+
+    def test_zero_views_zero_reposts(self) -> None:
+        assert _compute_f2a(0, 0, 50_000, 500) == 0.0
+
+
+class TestComputeF2b:
+    def test_above_floor(self) -> None:
+        # 2000 vph / 1000 floor = 2.0 → capped at 1.0
+        assert _compute_f2b(2_000.0, 1_000.0) == 1.0
+
+    def test_exactly_floor(self) -> None:
+        assert _compute_f2b(1_000.0, 1_000.0) == 1.0
+
+    def test_below_floor(self) -> None:
+        assert abs(_compute_f2b(500.0, 1_000.0) - 0.5) < 0.001
+
+    def test_none_views_per_hour(self) -> None:
+        assert _compute_f2b(None, 1_000.0) is None
+
+
+class TestComputeF3:
+    def test_single_poster_same_dir(self) -> None:
+        assert _compute_f3(1, 1) == 1.0
+
+    def test_two_of_three_same_dir(self) -> None:
+        assert abs(_compute_f3(2, 3) - 0.6667) < 0.001
+
+    def test_zero_total(self) -> None:
+        assert _compute_f3(0, 0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# SignalClassifier
+# ---------------------------------------------------------------------------
+
+
+class TestSignalClassifier:
+    def _make_classifier(self, config: dict | None = None) -> SignalClassifier:
+        return SignalClassifier(config or dict(_DEFAULT_CONFIG))
+
+    def test_act_now_views(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(50_000, 0, 5_000, 5.0, "LONG", 4) == "ACT_NOW"
+
+    def test_act_now_reposts(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(0, 500, 5_000, 5.0, "LONG", 4) == "ACT_NOW"
+
+    def test_watch_velocity(self) -> None:
+        clf = self._make_classifier()
+        # Below view threshold, above vel floor
+        assert clf.classify(10_000, 50, 1_500, 4.0, "LONG", 3) == "WATCH"
+
+    def test_unscored_low_conviction(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(60_000, 600, 5_000, 0.0, "LONG", 1) == "UNSCORED"
+
+    def test_unscored_ambiguous_direction(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(60_000, 600, 5_000, 5.0, "AMBIGUOUS", 4) == "UNSCORED"
+
+    def test_unscored_neutral_direction(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(5_000, 30, 200, 2.0, "NEUTRAL", 3) == "UNSCORED"
+
+    def test_unscored_low_virality_low_velocity(self) -> None:
+        clf = self._make_classifier()
+        assert clf.classify(1_000, 10, 200, 2.0, "LONG", 3) == "UNSCORED"
+
+
+# ---------------------------------------------------------------------------
+# ScoringEngine — single post scoring
+# ---------------------------------------------------------------------------
+
+
+class TestScoringEngineSinglePost:
+    def test_act_now_signal_all_scores_populated(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=60_000, reposts=600, credibility=8.0)
+        results = engine.score([inp])
+        assert len(results) == 1
+        sig = results[0]
+        assert sig.tier == "ACT_NOW"
+        assert sig.score_credibility == pytest.approx(0.8, abs=0.001)
+        assert sig.score_virality_abs is not None
+        assert sig.score_consensus is not None
+        assert sig.direction_flip is False
+        assert sig.conflict_group is None
+        assert sig.conviction_score > 0
+
+    def test_conviction_score_formula(self) -> None:
+        """Verify conviction_score = (w_cred*F1 + w_vir*F2a + w_cons*F3) * 10 for ACT_NOW."""
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        # views=60000, threshold=50000 → F2a = 1.0
+        # credibility=8.0 → F1 = 0.8
+        # distinct_same=1, total=1 → F3 = 1.0
+        inp = _make_input(views=60_000, reposts=0, credibility=8.0, distinct_same=1, total_distinct=1)
+        results = engine.score([inp])
+        sig = results[0]
+        # Expected: (0.25*0.8 + 0.35*1.0 + 0.25*1.0) * 10 = (0.2 + 0.35 + 0.25) * 10 = 8.0
+        assert sig.conviction_score == pytest.approx(8.0, abs=0.01)
+
+    def test_f3_partial_consensus(self) -> None:
+        """F3 with 1 of 3 posters in same direction reduces score."""
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=60_000, reposts=0, credibility=8.0, distinct_same=1, total_distinct=3)
+        results = engine.score([inp])
+        sig = results[0]
+        # F3 = 1/3 ≈ 0.333
+        expected = (0.25 * 0.8 + 0.35 * 1.0 + 0.25 * (1 / 3)) * 10
+        assert sig.conviction_score == pytest.approx(expected, abs=0.01)
+
+    def test_f4_amplifier_none_until_task009(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=60_000, reposts=600)
+        results = engine.score([inp])
+        assert results[0].score_amplifier is None
+
+    def test_f5_liquidity_none_until_task009(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=60_000, reposts=600)
+        results = engine.score([inp])
+        assert results[0].liquidity_modifier is None
+
+    def test_virality_vel_none_for_act_now(self) -> None:
+        """F2b (virality_vel) must be NULL for ACT_NOW signals."""
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=60_000, reposts=0)  # ACT_NOW via views
+        results = engine.score([inp])
+        assert results[0].tier == "ACT_NOW"
+        assert results[0].score_virality_vel is None
+
+    def test_virality_vel_populated_for_watch(self) -> None:
+        """F2b must be non-None for WATCH tier signals."""
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        # Below view threshold (10k < 50k), above vel floor (1500 > 1000)
+        inp = _make_input(views=10_000, reposts=0)
+        results = engine.score([inp])
+        assert results[0].tier == "WATCH"
+        assert results[0].score_virality_vel is not None
+
+    def test_empty_input(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        assert engine.score([]) == []
+
+
+# ---------------------------------------------------------------------------
+# UNSCORED gate
+# ---------------------------------------------------------------------------
+
+
+class TestUnscoredGate:
+    def test_conviction_1_unscored(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(conviction_level=1, views=100_000, reposts=1_000)
+        results = engine.score([inp])
+        sig = results[0]
+        assert sig.tier == "UNSCORED"
+        assert sig.conviction_score == 0.0
+        assert sig.score_credibility == 0.0
+
+    def test_conviction_0_unscored(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(conviction_level=0, views=100_000)
+        results = engine.score([inp])
+        assert results[0].tier == "UNSCORED"
+
+    def test_ambiguous_direction_unscored(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(direction="AMBIGUOUS", conviction_level=4, views=100_000)
+        results = engine.score([inp])
+        sig = results[0]
+        assert sig.tier == "UNSCORED"
+        assert sig.conviction_score == 0.0
+        assert sig.score_credibility == 0.0
+
+    def test_neutral_direction_unscored(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(direction="NEUTRAL", conviction_level=3, views=100_000)
+        results = engine.score([inp])
+        assert results[0].tier == "UNSCORED"
 
     def test_conviction_2_passes_gate(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(conviction_level=2),
-            **_DEFAULT_CTX,
-        )
-        assert result.composite_score > 0.0
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(conviction_level=2, views=60_000)
+        results = engine.score([inp])
+        assert results[0].tier != "UNSCORED"
+        assert results[0].conviction_score > 0
 
 
-class TestCredibilitySubScore:
-    def test_credibility_normalized(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=10.0,
-            rolling_accuracy_30d=0.5,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_credibility == 1.0
-
-    def test_low_credibility(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=2.0,
-            rolling_accuracy_30d=0.5,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_credibility == 0.2
-
-
-class TestConvictionSubScore:
-    def test_max_conviction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(_make_post_score(conviction_level=5), **_DEFAULT_CTX)
-        assert result.score_conviction == 1.0
-
-    def test_mid_conviction(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(_make_post_score(conviction_level=3), **_DEFAULT_CTX)
-        assert result.score_conviction == 0.6
-
-
-class TestArgumentSubScore:
-    @pytest.mark.parametrize("quality,expected", [
-        ("HIGH", 1.0),
-        ("MEDIUM", 0.6),
-        ("LOW", 0.2),
-    ])
-    def test_argument_mapping(self, quality: str, expected: float) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(argument_quality=quality), **_DEFAULT_CTX,
-        )
-        assert result.score_argument == expected
-
-
-class TestEngagementSubScore:
-    def test_engagement_formula(self) -> None:
-        engine = ScoringEngine()
-        # (50000 + 5*500) / 100000 = 52500/100000 = 0.525
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.5,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_engagement == 0.525
-
-    def test_engagement_clamped_to_1(self) -> None:
-        engine = ScoringEngine()
-        # Viral post: engagement > max → clamped to 1.0
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.5,
-            view_count=200_000,
-            repost_count=10_000,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_engagement == 1.0
-
-    def test_null_view_count_uses_median(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.5,
-            view_count=None,
-            repost_count=None,
-            max_engagement_30d=100_000.0,
-            median_engagement=40_000.0,
-        )
-        assert result.score_engagement == 0.4
-
-    def test_null_view_count_no_median_defaults_05(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.5,
-            view_count=None,
-            repost_count=None,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_engagement == 0.5
-
-    def test_zero_max_engagement_defaults_05(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.5,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=0.0,
-        )
-        assert result.score_engagement == 0.5
-
-
-class TestHistoricalSubScore:
-    def test_historical_accuracy(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=0.75,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_historical == 0.75
-
-    def test_null_accuracy_defaults_05(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(),
-            credibility_score=5.0,
-            rolling_accuracy_30d=None,
-            view_count=50_000,
-            repost_count=500,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.score_historical == 0.5
-
-
-class TestCompositeScore:
-    def test_composite_in_range(self) -> None:
-        engine = ScoringEngine()
-        result = engine.score(_make_post_score(), **_DEFAULT_CTX)
-        assert 0.0 <= result.composite_score <= 10.0
-
-    def test_max_possible_score(self) -> None:
-        """All components at max → composite ≈ 10.0."""
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(conviction_level=5, argument_quality="HIGH"),
-            credibility_score=10.0,
-            rolling_accuracy_30d=1.0,
-            view_count=100_000,
-            repost_count=0,
-            max_engagement_30d=100_000.0,
-        )
-        assert result.composite_score == 10.0
-
-    def test_known_calculation(self) -> None:
-        """Verify exact composite with known inputs.
-
-        credibility: 8.5/10 = 0.85  × 0.30 = 0.255
-        conviction:  4/5   = 0.80  × 0.25 = 0.200
-        argument:    HIGH  = 1.00  × 0.20 = 0.200
-        engagement:  52500/100000 = 0.525 × 0.15 = 0.07875
-        historical:  0.65         × 0.10 = 0.065
-        sum = 0.79875 × 10 = 7.9875
-        """
-        engine = ScoringEngine()
-        result = engine.score(_make_post_score(), **_DEFAULT_CTX)
-        assert abs(result.composite_score - 7.9875) < 0.01
+# ---------------------------------------------------------------------------
+# Weights are DB-driven
+# ---------------------------------------------------------------------------
 
 
 class TestWeightsFromDB:
     def test_different_weights_change_score(self) -> None:
-        """Verify that weights from DB are actually used."""
-        default_engine = ScoringEngine()
-        result_default = default_engine.score(_make_post_score(), **_DEFAULT_CTX)
+        cfg_heavy_cred = dict(_DEFAULT_CONFIG)
+        cfg_heavy_cred["weight_credibility"] = 0.90
+        cfg_heavy_cred["weight_virality_abs"] = 0.05
+        cfg_heavy_cred["weight_consensus"] = 0.05
 
-        # Heavily weight conviction (the only component that changed)
-        custom_weights = {
-            "credibility": 0.05,
-            "conviction": 0.70,
-            "argument": 0.05,
-            "engagement": 0.10,
-            "historical": 0.10,
-        }
-        custom_engine = ScoringEngine(weights=custom_weights)
-        result_custom = custom_engine.score(_make_post_score(), **_DEFAULT_CTX)
+        repo_default = _make_repo()
+        repo_custom = _make_repo(cfg_heavy_cred)
 
-        assert result_default.composite_score != result_custom.composite_score
+        engine_default = ScoringEngine(repo_default)
+        engine_custom = ScoringEngine(repo_custom)
 
-    def test_custom_weights_applied(self) -> None:
-        """With 100% conviction weight, composite = conviction * 10."""
-        engine = ScoringEngine(weights={
-            "credibility": 0.0,
-            "conviction": 1.0,
-            "argument": 0.0,
-            "engagement": 0.0,
-            "historical": 0.0,
-        })
-        result = engine.score(
-            _make_post_score(conviction_level=4),
-            **_DEFAULT_CTX,
+        inp = _make_input(views=60_000, credibility=1.0, distinct_same=1, total_distinct=1)
+        score_default = engine_default.score([inp])[0].conviction_score
+        score_custom = engine_custom.score([inp])[0].conviction_score
+
+        assert score_default != score_custom
+
+    def test_zero_credibility_weight(self) -> None:
+        cfg = dict(_DEFAULT_CONFIG)
+        cfg["weight_credibility"] = 0.0
+        cfg["weight_virality_abs"] = 0.50
+        cfg["weight_consensus"] = 0.50
+
+        repo = _make_repo(cfg)
+        engine = ScoringEngine(repo)
+        # Credibility is irrelevant now — 100 or 1 should give same score
+        inp_high = _make_input(views=60_000, credibility=10.0, distinct_same=1, total_distinct=1)
+        inp_low = _make_input(views=60_000, credibility=1.0, distinct_same=1, total_distinct=1)
+        score_high = engine.score([inp_high])[0].conviction_score
+        score_low = engine.score([inp_low])[0].conviction_score
+        assert score_high == pytest.approx(score_low, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# ConflictResolver — same-poster repeat (highest virality retained)
+# ---------------------------------------------------------------------------
+
+
+class TestConflictResolverSamePosterRepeat:
+    def test_same_direction_keeps_highest_virality(self) -> None:
+        """Two posts from same poster LONG AAPL — highest views retained."""
+        resolver = ConflictResolver(direction_flip_penalty=0.0)
+
+        inp_low = _make_input(ticker="AAPL", handle="poster_a", views=20_000)
+        inp_high = _make_input(ticker="AAPL", handle="poster_a", views=60_000)
+
+        resolved = resolver.resolve([inp_low, inp_high])
+        assert len(resolved) == 1
+        retained_inp, flip, penalty, cg = resolved[0]
+        assert retained_inp.raw_post.view_count == 60_000
+        assert flip is False
+        assert penalty == 0.0
+
+    def test_same_direction_three_posts_keeps_highest(self) -> None:
+        resolver = ConflictResolver()
+        inputs = [
+            _make_input(ticker="AAPL", handle="poster_a", views=10_000),
+            _make_input(ticker="AAPL", handle="poster_a", views=80_000),
+            _make_input(ticker="AAPL", handle="poster_a", views=40_000),
+        ]
+        resolved = resolver.resolve(inputs)
+        assert len(resolved) == 1
+        assert resolved[0][0].raw_post.view_count == 80_000
+
+
+# ---------------------------------------------------------------------------
+# ConflictResolver — same-poster direction flip
+# ---------------------------------------------------------------------------
+
+
+class TestConflictResolverDirectionFlip:
+    def test_flip_tagged_direction_flip_true(self) -> None:
+        """Same poster LONG then SHORT on same ticker → direction_flip=True."""
+        resolver = ConflictResolver(direction_flip_penalty=0.0)
+
+        inp_long = ScoringInput(
+            post_score=_make_post_score(direction="LONG"),
+            raw_post=_make_raw_post(views=30_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
         )
-        # conviction = 4/5 = 0.8; composite = 0.8 * 10 = 8.0
-        assert result.composite_score == 8.0
-
-
-class TestShortSignals:
-    def test_short_scores_normally(self) -> None:
-        """SHORT direction with high conviction should score > 0."""
-        engine = ScoringEngine()
-        result = engine.score(
-            _make_post_score(direction="SHORT", conviction_level=5),
-            **_DEFAULT_CTX,
+        inp_short = ScoringInput(
+            post_score=_make_post_score(direction="SHORT"),
+            raw_post=_make_raw_post(views=50_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 22, 0, tzinfo=timezone.utc),  # more recent
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
         )
-        assert result.composite_score > 0.0
+
+        resolved = resolver.resolve([inp_long, inp_short])
+        assert len(resolved) == 1
+        retained, flip, penalty, cg = resolved[0]
+        assert flip is True
+        assert penalty == 0.0  # default penalty = 0
+
+    def test_flip_keeps_most_recent(self) -> None:
+        """Most-recent post retained on direction flip."""
+        resolver = ConflictResolver(direction_flip_penalty=0.0)
+
+        inp_old = ScoringInput(
+            post_score=_make_post_score(direction="LONG"),
+            raw_post=_make_raw_post(views=80_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc),  # older
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+        inp_new = ScoringInput(
+            post_score=_make_post_score(direction="SHORT"),
+            raw_post=_make_raw_post(views=20_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 22, 0, tzinfo=timezone.utc),  # newer
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+
+        resolved = resolver.resolve([inp_old, inp_new])
+        assert len(resolved) == 1
+        retained, flip, penalty, cg = resolved[0]
+        # Most recent retained even though views are lower
+        assert retained.posted_at == inp_new.posted_at
+        assert flip is True
+
+    def test_flip_penalty_zero_final_score_equals_conviction(self) -> None:
+        """direction_flip_penalty=0.0 → final_score == conviction_score."""
+        repo = _make_repo()  # penalty=0.0 in default config
+        engine = ScoringEngine(repo)
+
+        inp_long = ScoringInput(
+            post_score=_make_post_score(direction="LONG", conviction_level=4),
+            raw_post=_make_raw_post(views=30_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+        inp_short = ScoringInput(
+            post_score=_make_post_score(direction="SHORT", conviction_level=4),
+            raw_post=_make_raw_post(views=60_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 22, 0, tzinfo=timezone.utc),
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+
+        results = engine.score([inp_long, inp_short])
+        assert len(results) == 1
+        sig = results[0]
+        assert sig.direction_flip is True
+        assert sig.penalty_applied == 0.0
+        assert sig.final_score == pytest.approx(sig.conviction_score, abs=0.001)
+
+    def test_flip_penalty_2_deducts_from_final_score(self) -> None:
+        """direction_flip_penalty=2.0 → final_score = conviction_score - 2.0."""
+        cfg = dict(_DEFAULT_CONFIG)
+        cfg["direction_flip_penalty"] = 2.0
+        repo = _make_repo(cfg)
+        engine = ScoringEngine(repo)
+
+        inp_long = ScoringInput(
+            post_score=_make_post_score(direction="LONG", conviction_level=4),
+            raw_post=_make_raw_post(views=30_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+        inp_short = ScoringInput(
+            post_score=_make_post_score(direction="SHORT", conviction_level=4),
+            raw_post=_make_raw_post(views=60_000),
+            account_credibility=8.0,
+            posted_at=datetime(2026, 4, 20, 22, 0, tzinfo=timezone.utc),
+            collection_window_start=_WINDOW_START,
+            account_handle="poster_a",
+            ticker="GME",
+        )
+
+        results = engine.score([inp_long, inp_short])
+        sig = results[0]
+        assert sig.direction_flip is True
+        assert sig.penalty_applied == pytest.approx(2.0, abs=0.001)
+        assert sig.final_score == pytest.approx(sig.conviction_score - 2.0, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# ConflictResolver — 3+ posters mixed direction
+# ---------------------------------------------------------------------------
+
+
+class TestConflictResolverMixedDirection:
+    def _make_input_for(
+        self,
+        ticker: str,
+        direction: str,
+        handle: str,
+        views: int = 60_000,
+    ) -> ScoringInput:
+        return ScoringInput(
+            post_score=_make_post_score(direction=direction, conviction_level=4),
+            raw_post=_make_raw_post(views=views, handle=handle),
+            account_credibility=8.0,
+            posted_at=_POSTED_AT,
+            collection_window_start=_WINDOW_START,
+            account_handle=handle,
+            ticker=ticker,
+        )
+
+    def test_3_posters_mixed_direction_all_tagged(self) -> None:
+        """3 distinct posters on TSLA with mixed directions → conflict_group='opposing_exists'."""
+        resolver = ConflictResolver()
+        inputs = [
+            self._make_input_for("TSLA", "LONG", "poster_a"),
+            self._make_input_for("TSLA", "LONG", "poster_b"),
+            self._make_input_for("TSLA", "SHORT", "poster_c"),
+        ]
+        resolved = resolver.resolve(inputs)
+        # 3 distinct posters, mixed direction
+        conflict_groups = [cg for _, _, _, cg in resolved]
+        assert all(cg == "opposing_exists" for cg in conflict_groups)
+
+    def test_3_posters_same_direction_no_conflict_tag(self) -> None:
+        """3 posters all LONG → no conflict tag."""
+        resolver = ConflictResolver()
+        inputs = [
+            self._make_input_for("TSLA", "LONG", "poster_a"),
+            self._make_input_for("TSLA", "LONG", "poster_b"),
+            self._make_input_for("TSLA", "LONG", "poster_c"),
+        ]
+        resolved = resolver.resolve(inputs)
+        conflict_groups = [cg for _, _, _, cg in resolved]
+        assert all(cg is None for cg in conflict_groups)
+
+    def test_2_posters_mixed_direction_no_conflict_tag(self) -> None:
+        """2 posters mixed direction (not 3+) → no opposing_exists tag."""
+        resolver = ConflictResolver()
+        inputs = [
+            self._make_input_for("TSLA", "LONG", "poster_a"),
+            self._make_input_for("TSLA", "SHORT", "poster_b"),
+        ]
+        resolved = resolver.resolve(inputs)
+        conflict_groups = [cg for _, _, _, cg in resolved]
+        # Only 2 posters — threshold not met
+        assert all(cg is None for cg in conflict_groups)
+
+    def test_3_posters_mixed_one_long_two_short_tagged(self) -> None:
+        resolver = ConflictResolver()
+        inputs = [
+            self._make_input_for("TSLA", "LONG", "poster_a"),
+            self._make_input_for("TSLA", "SHORT", "poster_b"),
+            self._make_input_for("TSLA", "SHORT", "poster_c"),
+        ]
+        resolved = resolver.resolve(inputs)
+        # All 3 tagged since mixed directions exist with 3+ distinct posters
+        assert all(cg == "opposing_exists" for _, _, _, cg in resolved)
+
+    def test_full_engine_3_poster_mixed_produces_conflict_group(self) -> None:
+        """End-to-end: ScoringEngine marks conflict_group='opposing_exists' on all signals."""
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inputs = [
+            ScoringInput(
+                post_score=_make_post_score(direction="LONG", conviction_level=4),
+                raw_post=_make_raw_post(views=60_000, handle="a"),
+                account_credibility=8.0,
+                posted_at=_POSTED_AT,
+                collection_window_start=_WINDOW_START,
+                account_handle="a",
+                ticker="TSLA",
+            ),
+            ScoringInput(
+                post_score=_make_post_score(direction="LONG", conviction_level=4),
+                raw_post=_make_raw_post(views=55_000, handle="b"),
+                account_credibility=7.0,
+                posted_at=_POSTED_AT,
+                collection_window_start=_WINDOW_START,
+                account_handle="b",
+                ticker="TSLA",
+            ),
+            ScoringInput(
+                post_score=_make_post_score(direction="SHORT", conviction_level=4),
+                raw_post=_make_raw_post(views=65_000, handle="c"),
+                account_credibility=9.0,
+                posted_at=_POSTED_AT,
+                collection_window_start=_WINDOW_START,
+                account_handle="c",
+                ticker="TSLA",
+            ),
+        ]
+        results = engine.score(inputs)
+        assert len(results) == 3
+        assert all(s.conflict_group == "opposing_exists" for s in results)
+
+
+# ---------------------------------------------------------------------------
+# Tier threshold edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestTierThresholds:
+    def test_exactly_at_views_threshold_is_act_now(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=50_000, reposts=0)
+        results = engine.score([inp])
+        assert results[0].tier == "ACT_NOW"
+
+    def test_one_below_views_threshold_watch_if_vel_sufficient(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        # 49999 views in 8.5h posted window = ~5882 vph → above 1000 vel floor
+        inp = _make_input(views=49_999, reposts=0)
+        results = engine.score([inp])
+        # VPH = 49999 / ~8.5h ≈ 5882 → WATCH
+        assert results[0].tier == "WATCH"
+
+    def test_exactly_at_reposts_threshold_is_act_now(self) -> None:
+        repo = _make_repo()
+        engine = ScoringEngine(repo)
+        inp = _make_input(views=100, reposts=500)
+        results = engine.score([inp])
+        assert results[0].tier == "ACT_NOW"

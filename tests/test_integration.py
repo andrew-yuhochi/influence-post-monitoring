@@ -24,8 +24,6 @@ from influence_monitor.extraction.ticker_extractor import ExtractedTicker, Ticke
 from influence_monitor.ingestion.base import RawPost
 from influence_monitor.pipeline import PipelineOrchestrator
 from influence_monitor.scorecard.scorecard_engine import ScorecardEngine
-from influence_monitor.scoring.aggregator import SignalAggregator
-from influence_monitor.scoring.corroboration import CorroborationDetector
 from influence_monitor.scoring.llm_client import PostScore
 from influence_monitor.scoring.scoring_engine import ScoringEngine
 
@@ -162,9 +160,12 @@ async def _make_test_orchestrator(
         settings = _test_settings()
 
     # Real components
-    scoring_engine = await ScoringEngine.from_db(db)
-    corroboration_detector = CorroborationDetector(settings.corroboration_multiplier)
-    aggregator = SignalAggregator()
+    scoring_engine = ScoringEngine(db)
+    # Legacy placeholders — pipeline.py constructor still requires these params until TASK-010b
+    corroboration_detector = MagicMock()
+    corroboration_detector.detect.return_value = []
+    aggregator = MagicMock()
+    aggregator.rank.return_value = []
     calendar = HolidayCalendar()
 
     # ScorecardEngine: real except market_client is mocked

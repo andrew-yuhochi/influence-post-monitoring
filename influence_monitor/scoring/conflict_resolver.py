@@ -1,1 +1,3 @@
-# Conflict resolver: same-poster repeats, direction flips, multi-poster mixed — implemented in TASK-008.
+# ConflictResolver is implemented in scoring_engine.py — re-exported here for
+# convenient standalone imports.
+from influence_monitor.scoring.scoring_engine import ConflictResolver  # noqa: F401

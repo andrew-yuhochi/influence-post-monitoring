@@ -48,8 +48,6 @@ from influence_monitor.ingestion.base import SocialMediaSource
 from influence_monitor.market_data.base import MarketDataClient
 from influence_monitor.market_data.index_resolver import IndexMembershipResolver
 from influence_monitor.scorecard.scorecard_engine import ScorecardEngine
-from influence_monitor.scoring.corroboration import CorroborationDetector, Signal
-from influence_monitor.scoring.aggregator import SignalAggregator
 from influence_monitor.scoring.llm_client import LLMClient
 from influence_monitor.scoring.scoring_engine import ScoringEngine
 
@@ -58,6 +56,32 @@ logger = logging.getLogger(__name__)
 # Overnight window: yesterday 4 PM ET to today 6:30 AM ET (in UTC)
 _OVERNIGHT_HOURS_BACK = 15  # hours before pipeline run
 _ET_OFFSET = timedelta(hours=4)   # EST offset from UTC (DST ignored for PoC)
+
+
+# ---------------------------------------------------------------------------
+# Legacy Signal shim — used by the old pipeline path until TASK-010a/b removes it
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dataclass, field as _field
+from datetime import date as _date
+
+
+@_dataclass
+class Signal:  # noqa: N801 — legacy compatibility shim; removed in TASK-010b
+    """Minimal signal shim — replaces the deleted scoring.corroboration.Signal."""
+
+    signal_id: int | None
+    post_id: int
+    investor_id: int
+    ticker: str
+    direction: str
+    signal_date: _date
+    composite_score: float
+    corroboration_count: int = 1
+    corroboration_bonus: float = 1.0
+    final_score: float = 0.0
+    investor_name: str = ""
+    extraction_confidence: str = ""
 
 
 # HolidayCalendar, _easter, _nyse_holidays, _observe are imported from
@@ -83,8 +107,8 @@ class PipelineOrchestrator:
         ticker_extractor: TickerExtractor,
         llm_client: LLMClient,
         scoring_engine: ScoringEngine,
-        corroboration_detector: CorroborationDetector,
-        aggregator: SignalAggregator,
+        corroboration_detector: object,  # legacy param kept for TASK-010a compatibility
+        aggregator: object,              # legacy param kept for TASK-010a compatibility
         index_resolver: IndexMembershipResolver,
         market_client: MarketDataClient,
         scorecard_engine: ScorecardEngine,
@@ -99,8 +123,8 @@ class PipelineOrchestrator:
         self._ticker_extractor = ticker_extractor
         self._llm_client = llm_client
         self._scoring_engine = scoring_engine
-        self._corroboration_detector = corroboration_detector
-        self._aggregator = aggregator
+        self._corroboration_detector = corroboration_detector  # legacy; removed in TASK-010b
+        self._aggregator = aggregator                          # legacy; removed in TASK-010b
         self._index_resolver = index_resolver
         self._market_client = market_client
         self._scorecard_engine = scorecard_engine
@@ -172,7 +196,7 @@ class PipelineOrchestrator:
         )
         logger.info("Fetched %d posts from %d accounts", len(posts), success_count)
 
-        all_signals: list[Signal] = []
+        all_signals: list[Any] = []  # legacy Signal list; replaced by ScoredSignal in TASK-010b
         signal_id_map: dict[int, int] = {}  # signal_list_index → db_id
 
         for post in posts:
@@ -270,18 +294,21 @@ class PipelineOrchestrator:
 
                 all_signals.append(sig)
 
-        # Corroboration + ranking
-        self._corroboration_detector.detect(all_signals)
-        ranked = self._aggregator.rank(all_signals, top_n=self._settings.top_n_signals)
+        # Legacy corroboration + ranking (replaced by ConflictResolver + ScoringEngine in TASK-010b)
+        # self._corroboration_detector and self._aggregator are legacy objects; calls kept temporarily
+        # until TASK-010a/b removes this pipeline entirely.
+        if hasattr(self._corroboration_detector, "detect"):
+            self._corroboration_detector.detect(all_signals)
+        ranked = self._aggregator.rank(all_signals, top_n=self._settings.top_n_signals) if hasattr(self._aggregator, "rank") else []
 
-        # Persist morning rank, corroboration, and index tier
+        # Persist morning rank and index tier (legacy path; replaced in TASK-010b)
         if not dry_run:
             for rank, sig in enumerate(ranked, start=1):
                 if sig.signal_id is not None:
                     await self._repo.update_signal_morning_rank(
                         sig.signal_id, rank,
-                        sig.corroboration_count,
-                        sig.corroboration_bonus,
+                        getattr(sig, "corroboration_count", 1),
+                        getattr(sig, "corroboration_bonus", 1.0),
                     )
                     tier = await self._index_resolver.resolve(sig.ticker)
                     await self._repo.update_signal_index_tier(sig.signal_id, tier)
@@ -314,7 +341,7 @@ class PipelineOrchestrator:
             posts_fetched=len(posts),
             signals_scored=len(all_signals),
             signals_surfaced=len(ranked),
-            corroborated_signals=sum(1 for s in ranked if s.corroboration_count >= 2),
+            corroborated_signals=sum(1 for s in ranked if getattr(s, "corroboration_count", 1) >= 2),
             pipeline_status="ok",
         )
         logger.info(
@@ -456,9 +483,10 @@ async def build_orchestrator(settings: Settings, repo: DatabaseRepository) -> Pi
     ingestor = SOURCE_REGISTRY[settings.twitter_source](settings)
     ticker_extractor = TickerExtractor(SymbolWhitelist.load())
     llm_client = ClaudeHaikuClient(settings, repo)
-    scoring_engine = await ScoringEngine.from_db(repo)
-    corroboration_detector = CorroborationDetector(settings.corroboration_multiplier)
-    aggregator = SignalAggregator()
+    scoring_engine = ScoringEngine(repo)
+    # Legacy placeholders — removed in TASK-010b when pipeline.py is rewritten
+    corroboration_detector = object()
+    aggregator = object()
     index_resolver = IndexMembershipResolver(repo)
     await index_resolver.initialize()
     yf_client = YFinanceClient()
@@ -505,18 +533,21 @@ def _overnight_since(run_date: date) -> datetime:
 
 
 def _signals_to_render_rows(
-    signals: list[Signal], signal_date: date
+    signals: list[Any], signal_date: date
 ) -> list[dict[str, Any]]:
-    """Convert Signal objects to the dict shape expected by render_from_rows."""
+    """Convert signal objects to the dict shape expected by render_from_rows.
+
+    Legacy helper — replaced in TASK-010b when pipeline.py is rewritten.
+    """
     return [
         {
             "morning_rank": rank,
             "ticker": sig.ticker,
             "direction": sig.direction,
-            "composite_score": sig.composite_score,
-            "corroboration_count": sig.corroboration_count,
+            "composite_score": getattr(sig, "composite_score", 0.0),
+            "corroboration_count": getattr(sig, "corroboration_count", 1),
             "index_tier": "MICRO",  # best-effort for dry-run (not yet resolved)
-            "investor_name": sig.investor_name,
+            "investor_name": getattr(sig, "investor_name", ""),
             "x_handle": "",
             "total_calls": 0,
             "total_hits": 0,
