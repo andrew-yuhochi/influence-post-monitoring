@@ -48,47 +48,149 @@ def _row_to_dict(row: Any, columns: tuple[str, ...] | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class _LibsqlBackend:
-    """Thin wrapper around libsql_client.ClientSync."""
+    """Direct HTTP client for Turso's v2 pipeline API.
+
+    Replaces the unmaintained libsql_client package which failed with
+    KeyError: 'result' against Turso's current response format.
+    Uses httpx (already a project dependency) to POST to /v2/pipeline.
+    """
 
     def __init__(self, url: str, auth_token: str | None) -> None:
-        import libsql_client  # type: ignore[import]
+        import httpx  # already in requirements.txt
 
-        # Turso's newer infrastructure (2024+) dropped WebSocket (wss://) support.
-        # libsql_client converts libsql:// to wss://, so normalise to https:// first.
+        # Normalise libsql:// scheme to https:// for the HTTP API.
         if url.startswith("libsql://"):
             url = url.replace("libsql://", "https://", 1)
 
-        kwargs: dict[str, Any] = {"url": url}
+        self._pipeline_url = f"{url}/v2/pipeline"
+        self._headers: dict[str, str] = {
+            "Content-Type": "application/json",
+        }
         if auth_token:
-            kwargs["auth_token"] = auth_token
-        self._client = libsql_client.create_client_sync(**kwargs)
+            self._headers["Authorization"] = f"Bearer {auth_token}"
+        self._client = httpx.Client(timeout=30.0)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_turso_value(v: Any) -> dict[str, str]:
+        """Convert a Python value to a Turso v2 typed value object."""
+        if v is None:
+            return {"type": "null", "value": "null"}
+        if isinstance(v, bool):
+            return {"type": "integer", "value": "1" if v else "0"}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "real", "value": str(v)}
+        if isinstance(v, bytes):
+            import base64
+            return {"type": "blob", "value": base64.b64encode(v).decode()}
+        return {"type": "text", "value": str(v)}
+
+    def _post_pipeline(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """POST a batch of pipeline requests and return the results list."""
+        body = {"requests": requests}
+        response = self._client.post(self._pipeline_url, headers=self._headers, json=body)
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            logger.error(
+                "Turso pipeline request failed: status=%s body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            raise
+        data = response.json()
+        return data["results"]
+
+    def _build_execute_request(self, sql: str, params: list[Any] | None) -> dict[str, Any]:
+        """Build a single execute request object for the pipeline body."""
+        stmt: dict[str, Any] = {"sql": sql}
+        if params:
+            stmt["args"] = [self._to_turso_value(p) for p in params]
+        return {"type": "execute", "stmt": stmt}
+
+    @staticmethod
+    def _parse_result_to_dicts(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Convert a Turso v2 execute result into a list of plain dicts."""
+        cols = [c["name"] for c in result.get("cols", [])]
+        rows_out: list[dict[str, Any]] = []
+        for row in result.get("rows", []):
+            row_dict: dict[str, Any] = {}
+            for col_name, cell in zip(cols, row):
+                cell_type = cell.get("type", "null")
+                raw = cell.get("value")
+                if cell_type == "null" or raw is None:
+                    row_dict[col_name] = None
+                elif cell_type == "integer":
+                    row_dict[col_name] = int(raw)
+                elif cell_type == "real":
+                    row_dict[col_name] = float(raw)
+                else:
+                    row_dict[col_name] = raw
+            rows_out.append(row_dict)
+        return rows_out
+
+    # ------------------------------------------------------------------
+    # Public interface (mirrors _Sqlite3Backend)
+    # ------------------------------------------------------------------
 
     def execute(
         self,
         sql: str,
         params: list[Any] | None = None,
     ) -> list[dict[str, Any]]:
-        result = self._client.execute(sql, params or [])
-        cols = result.columns
-        return [_row_to_dict(r, cols) for r in result.rows]
+        requests = [
+            self._build_execute_request(sql, params),
+            {"type": "close"},
+        ]
+        results = self._post_pipeline(requests)
+        # results[0] is the execute response; results[1] is close
+        execute_result = results[0]
+        if execute_result.get("type") == "error":
+            raise RuntimeError(f"Turso execute error: {execute_result.get('error')}")
+        inner = execute_result["response"]["result"]
+        return self._parse_result_to_dicts(inner)
 
     def executemany(self, sql: str, param_list: list[list[Any]]) -> None:
-        for params in param_list:
-            self._client.execute(sql, params)
+        if not param_list:
+            return
+        requests: list[dict[str, Any]] = [
+            self._build_execute_request(sql, params) for params in param_list
+        ]
+        requests.append({"type": "close"})
+        results = self._post_pipeline(requests)
+        for i, res in enumerate(results[:-1]):  # skip the close result
+            if res.get("type") == "error":
+                raise RuntimeError(
+                    f"Turso executemany error at index {i}: {res.get('error')}"
+                )
 
     def executescript(self, script: str) -> None:
         """Execute a multi-statement SQL script (split on ';')."""
-        statements = [
-            s.strip() for s in script.split(";") if s.strip()
+        statements = [s.strip() for s in script.split(";") if s.strip()]
+        if not statements:
+            return
+        requests: list[dict[str, Any]] = [
+            {"type": "execute", "stmt": {"sql": s}} for s in statements
         ]
-        self._client.batch(statements)
+        requests.append({"type": "close"})
+        results = self._post_pipeline(requests)
+        for i, res in enumerate(results[:-1]):  # skip the close result
+            if res.get("type") == "error":
+                raise RuntimeError(
+                    f"Turso executescript error at statement {i}: {res.get('error')}"
+                )
 
     def close(self) -> None:
         self._client.close()
 
     @property
     def lastrowid(self) -> int | None:
-        return None  # not available via batch/execute on libsql
+        return None  # not available via Turso HTTP API
 
 
 class _Sqlite3Backend:
