@@ -1,23 +1,29 @@
 -- Influence Post Monitoring — Database Schema (TDD §2.4)
 -- All row-producing tables carry tenant_id + user_id (multi-tenancy from day one).
--- SQLite dialect (Turso-hosted); PostgreSQL-compatible by design.
+-- Pure SQLite/Turso dialect. Types used:
+--   INTEGER PRIMARY KEY  — rowid alias (auto-increment)
+--   INTEGER              — int values and booleans (0/1)
+--   REAL                 — floating-point
+--   TEXT                 — strings, ISO8601 dates/timestamps, JSON
+-- BOOLEAN, DATE, DATETIME are replaced with INTEGER/TEXT to avoid
+-- PostgreSQL-dialect parse errors in Turso's sqld.
 -- PoC: all tenant_id / user_id default to 1.
 
 -- Tenant registry
 CREATE TABLE IF NOT EXISTS tenants (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
--- User registry (single user at PoC; ready for multi-tenant Beta)
+-- User registry (single user at PoC — ready for multi-tenant Beta)
 CREATE TABLE IF NOT EXISTS users (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL DEFAULT 1,
     tenant_id   INTEGER NOT NULL DEFAULT 1,
     phone_e164  TEXT NOT NULL,
     timezone    TEXT NOT NULL DEFAULT 'America/Toronto',
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (tenant_id) REFERENCES tenants(id)
 );
 
@@ -35,17 +41,17 @@ CREATE TABLE IF NOT EXISTS accounts (
     backup_rank             INTEGER,
     last_fetch_status       TEXT,
     consecutive_failures    INTEGER NOT NULL DEFAULT 0,
-    last_validated_at       DATETIME,
-    last_failure_at         DATETIME,
+    last_validated_at       TEXT,
+    last_failure_at         TEXT,
     follower_count_at_post  INTEGER,
     notes                   TEXT,
-    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at              TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (tenant_id) REFERENCES tenants(id),
     UNIQUE (tenant_id, handle)
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status, tenant_id);
 
--- Raw posts (immutable after first fetch; Burry-deletion-resistant)
+-- Raw posts (immutable after first fetch — Burry-deletion-resistant)
 CREATE TABLE IF NOT EXISTS posts (
     id            INTEGER PRIMARY KEY,
     user_id       INTEGER NOT NULL DEFAULT 1,
@@ -54,14 +60,14 @@ CREATE TABLE IF NOT EXISTS posts (
     external_id   TEXT NOT NULL,
     source_type   TEXT NOT NULL,
     text          TEXT NOT NULL,
-    posted_at     DATETIME NOT NULL,
-    fetched_at    DATETIME NOT NULL,
+    posted_at     TEXT NOT NULL,
+    fetched_at    TEXT NOT NULL,
     view_count    INTEGER,
     repost_count  INTEGER,
     reply_count   INTEGER,
     like_count    INTEGER,
     bookmark_count INTEGER,
-    deleted       BOOLEAN DEFAULT 0,
+    deleted       INTEGER DEFAULT 0,
     raw_payload   TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (tenant_id) REFERENCES tenants(id),
@@ -72,7 +78,7 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE TABLE IF NOT EXISTS engagement_snapshots (
     id           INTEGER PRIMARY KEY,
     post_id      INTEGER NOT NULL,
-    snapshot_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    snapshot_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     view_count   INTEGER,
     repost_count INTEGER,
     reply_count  INTEGER,
@@ -88,9 +94,9 @@ CREATE TABLE IF NOT EXISTS retweeters (
     retweeter_external_id TEXT NOT NULL,
     retweeter_handle      TEXT,
     followers_count       INTEGER,
-    is_verified           BOOLEAN,
-    is_monitored          BOOLEAN DEFAULT 0,
-    fetched_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_verified           INTEGER,
+    is_monitored          INTEGER DEFAULT 0,
+    fetched_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (post_id) REFERENCES posts(id),
     UNIQUE (post_id, retweeter_external_id)
 );
@@ -104,17 +110,17 @@ CREATE TABLE IF NOT EXISTS price_cache (
     market_cap_class TEXT,
     sector           TEXT,
     industry         TEXT,
-    last_updated     DATETIME DEFAULT CURRENT_TIMESTAMP
+    last_updated     TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
--- Scoring config (factor weights + thresholds + penalties; DB-driven, not hardcoded)
+-- Scoring config (factor weights + thresholds + penalties — DB-driven, not hardcoded)
 CREATE TABLE IF NOT EXISTS scoring_config (
     id          INTEGER PRIMARY KEY,
     tenant_id   INTEGER NOT NULL DEFAULT 1,
     key         TEXT NOT NULL,
     value       REAL NOT NULL,
     description TEXT,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (tenant_id, key)
 );
 -- Seeded rows (17 total):
@@ -133,7 +139,7 @@ CREATE TABLE IF NOT EXISTS signals (
     -- Provenance
     post_id                 INTEGER NOT NULL,
     account_id              INTEGER NOT NULL,
-    signal_date             DATE NOT NULL,
+    signal_date             TEXT NOT NULL,
     -- Ticker
     ticker                  TEXT NOT NULL,
     extraction_confidence   TEXT NOT NULL,
@@ -143,7 +149,7 @@ CREATE TABLE IF NOT EXISTS signals (
     conviction_level        INTEGER,
     argument_quality        TEXT,
     time_horizon            TEXT,
-    market_moving_potential BOOLEAN,
+    market_moving_potential INTEGER,
     key_claim               TEXT,
     rationale               TEXT,
     llm_model_version       TEXT,
@@ -158,13 +164,13 @@ CREATE TABLE IF NOT EXISTS signals (
     score_amplifier         REAL,
     liquidity_modifier      REAL,
     conviction_score        REAL,
-    direction_flip          BOOLEAN DEFAULT 0,
+    direction_flip          INTEGER DEFAULT 0,
     conflict_group          TEXT,
     penalty_applied         REAL DEFAULT 0,
     final_score             REAL,
     tier                    TEXT NOT NULL,
     morning_rank            INTEGER,
-    -- Outcome (evening pass; NULL until then)
+    -- Outcome (evening pass — NULL until then)
     prev_close              REAL,
     today_open              REAL,
     today_close             REAL,
@@ -174,13 +180,13 @@ CREATE TABLE IF NOT EXISTS signals (
     stock_20d_vol           REAL,
     excess_vol_score        REAL,
     price_data_source       TEXT,
-    outcome_fetched_at      DATETIME,
+    outcome_fetched_at      TEXT,
     -- Engagement views
     engagement_views        INTEGER,
     engagement_reposts      INTEGER,
     views_per_hour          REAL,
     -- Metadata
-    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at              TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (post_id) REFERENCES posts(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (tenant_id) REFERENCES tenants(id)
@@ -195,7 +201,7 @@ CREATE TABLE IF NOT EXISTS messages_sent (
     user_id      INTEGER NOT NULL DEFAULT 1,
     tenant_id    INTEGER NOT NULL DEFAULT 1,
     kind         TEXT NOT NULL,
-    sent_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    sent_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     delivery     TEXT NOT NULL,
     status       TEXT NOT NULL,
     body_preview TEXT,
@@ -207,7 +213,7 @@ CREATE TABLE IF NOT EXISTS messages_sent (
 CREATE TABLE IF NOT EXISTS daily_summaries (
     id               INTEGER PRIMARY KEY,
     tenant_id        INTEGER NOT NULL DEFAULT 1,
-    summary_date     DATE NOT NULL,
+    summary_date     TEXT NOT NULL,
     run_type         TEXT NOT NULL,
     accounts_active  INTEGER,
     accounts_fetched INTEGER,
@@ -219,14 +225,14 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
     pipeline_status  TEXT NOT NULL,
     error_message    TEXT,
     duration_seconds REAL,
-    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (tenant_id, summary_date, run_type)
 );
 
 -- API usage tracking (cost + rate-limit monitoring)
 CREATE TABLE IF NOT EXISTS api_usage (
     id            INTEGER PRIMARY KEY,
-    called_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    called_at     TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     provider      TEXT NOT NULL,
     endpoint      TEXT,
     input_tokens  INTEGER,
