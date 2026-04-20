@@ -137,7 +137,7 @@ def _render_conflict_block(sig_a: MorningSignal, sig_b: MorningSignal) -> str:
 
     for sig in (sig_a, sig_b):
         lines.append(
-            f"Score: {_conviction_display(sig.conviction_score, sig.direction)} - {round(sig.conviction_score / 10 * 100)}%"
+            f"Score: {_conviction_display(sig.conviction_score, sig.direction)}"
         )
         for poster in sig.posters:
             lines.append(f"@{poster.handle} - {poster.strategy}")
