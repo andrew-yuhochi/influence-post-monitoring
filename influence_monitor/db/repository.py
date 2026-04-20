@@ -481,6 +481,42 @@ class SignalRepository:
     # Signals
     # ------------------------------------------------------------------
 
+    def delete_signals_for_date(
+        self,
+        signal_date: date,
+        tenant_id: int = 1,
+    ) -> None:
+        """Delete all signals (and their fixture posts) for a given date and tenant.
+
+        Used by fixture modes to ensure idempotent re-runs — each fixture run
+        starts from a clean slate for the target date.
+        """
+        date_str = signal_date.isoformat()
+        # Collect fixture post IDs before deleting signals (FK: signals → posts)
+        post_id_rows = self._execute(
+            "SELECT DISTINCT post_id FROM signals WHERE signal_date = ? AND tenant_id = ?",
+            [date_str, tenant_id],
+        )
+        fixture_post_ids = [r["post_id"] for r in post_id_rows]
+
+        # Delete signals first (they reference posts via FK)
+        self._execute_write(
+            "DELETE FROM signals WHERE signal_date = ? AND tenant_id = ?",
+            [date_str, tenant_id],
+        )
+
+        # Now delete the fixture posts (no signals referencing them any more)
+        for post_id in fixture_post_ids:
+            self._execute_write(
+                "DELETE FROM posts WHERE id = ? AND source_type = 'fixture'",
+                [post_id],
+            )
+        logger.debug(
+            "delete_signals_for_date: cleared signals for %s (tenant_id=%d)",
+            date_str,
+            tenant_id,
+        )
+
     def insert_signal(self, **kwargs: Any) -> int | None:
         """Insert a signal row. Accepts all signals columns as keyword args.
 

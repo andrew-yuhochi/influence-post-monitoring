@@ -944,12 +944,10 @@ class PipelineOrchestrator:
         self._repo.init_schema()
         self._repo.seed(phone_e164=self._settings.recipient_phone_e164)
 
-        # Clear existing signals for today to avoid duplicate renders
-        if not dry_run:
-            self._repo._execute_write(
-                "DELETE FROM signals WHERE signal_date = ? AND tenant_id = 1",
-                [today_str],
-            )
+        # Clear existing signals for today unconditionally — fixture inserts always
+        # write to DB regardless of dry_run, so the delete must also always run to
+        # keep each fixture run idempotent.
+        self._repo.delete_signals_for_date(run_date, tenant_id=1)
 
         accounts = self._repo.get_accounts_by_status("primary", tenant_id=1)
         accounts_by_handle: dict[str, dict[str, Any]] = {
