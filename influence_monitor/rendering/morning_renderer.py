@@ -12,7 +12,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-_FILLED = "✅"
+_FILLED_BUY = "✅"
+_FILLED_SELL = "❌"
 
 
 @dataclass
@@ -53,8 +54,11 @@ def _direction_emoji(direction: str) -> str:
     return ""
 
 
-def _conviction_display(score: float) -> str:
-    """Return tick emoji bar + percentage score (filled ticks only, no empty markers)."""
+def _conviction_display(score: float, direction: str = "LONG") -> str:
+    """Return emoji bar + percentage score (filled markers only, no empty markers).
+
+    BUY/LONG signals use ✅; SELL/SHORT signals use ❌.
+    """
     if score >= 9.0:
         filled = 5
     elif score >= 7.0:
@@ -67,7 +71,8 @@ def _conviction_display(score: float) -> str:
         filled = 1
     else:
         filled = 0
-    bar = _FILLED * filled
+    marker = _FILLED_SELL if direction == "SHORT" else _FILLED_BUY
+    bar = marker * filled
     pct = round(score / 10 * 100)
     return f"{bar} - {pct}%"
 
@@ -93,7 +98,7 @@ def _render_signal_block(signal: MorningSignal, include_velocity: bool = False) 
     lines: list[str] = []
     cap_suffix = f" ({signal.market_cap_class})" if signal.market_cap_class else ""
     lines.append(f"*{emoji} {label} ${signal.ticker}{cap_suffix}*")
-    lines.append(f"Score: {_conviction_display(signal.conviction_score)}")
+    lines.append(f"Score: {_conviction_display(signal.conviction_score, signal.direction)}")
 
     for poster in signal.posters:
         lines.append(f"@{poster.handle} - {poster.strategy}")
@@ -124,7 +129,7 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
         ]
         return ["\n".join(parts)]
 
-    top_act = sorted(act_now, key=lambda s: s.conviction_score, reverse=True)[:5]
+    top_act = sorted(act_now, key=lambda s: s.conviction_score, reverse=True)
     top_watch = sorted(watch, key=lambda s: s.views_per_hour, reverse=True)[:5]
 
     # Build ACT NOW section
