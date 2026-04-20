@@ -1428,12 +1428,14 @@ def main() -> None:
 
     repo = SignalRepository(settings)
 
-    # Ensure schema + seed data exist before any run
+    # Ensure schema + seed data exist before any run.
+    # Schema init must succeed — swallowing failures here causes silent missing-table
+    # errors later (BUG-014d).  Seed failures (duplicate rows) are safe to ignore.
+    repo.init_schema()
     try:
-        repo.init_schema()
         repo.seed(phone_e164=settings.recipient_phone_e164)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Schema init/seed raised: %s (may already exist)", exc)
+        logger.warning("Seed raised: %s (rows may already exist, continuing)", exc)
 
     orchestrator = PipelineOrchestrator(settings=settings, repo=repo)
 
