@@ -55,26 +55,26 @@ def _direction_emoji(direction: str) -> str:
 
 
 def _conviction_display(score: float, direction: str = "LONG") -> str:
-    """Return emoji bar + percentage score (filled markers only, no empty markers).
+    """Return emoji bar + decimal score (filled markers only, no empty markers).
 
     BUY/LONG signals use ✅; SELL/SHORT signals use ❌.
+    Score is stored as 0.0–1.0 in the DB and displayed as a 2-decimal value.
     """
-    if score >= 9.0:
+    if score >= 0.9:
         filled = 5
-    elif score >= 7.0:
+    elif score >= 0.7:
         filled = 4
-    elif score >= 5.0:
+    elif score >= 0.5:
         filled = 3
-    elif score >= 3.0:
+    elif score >= 0.3:
         filled = 2
-    elif score >= 1.0:
+    elif score >= 0.1:
         filled = 1
     else:
         filled = 0
     marker = _FILLED_SELL if direction == "SHORT" else _FILLED_BUY
     bar = marker * filled
-    pct = round(score / 10 * 100)
-    return f"{bar} - {pct}%"
+    return f"{bar} - {score:.2f}"
 
 
 def _truncate_chars(text: str, max_chars: int = 150) -> str:
@@ -254,7 +254,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
             Poster(handle="DavidEinhorn", strategy="value investor"),
         ],
         direction="LONG",
-        conviction_score=9.2,
+        conviction_score=0.92,
         summary="Fannie Mae is absurdly underpriced. Regulatory unlock is imminent and this goes 10x from here.",
         views_per_hour=12500.0,
         corroboration_count=2,
@@ -268,7 +268,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         ticker="NFLX",
         posters=[Poster(handle="WallStCynic", strategy="short seller")],
         direction="SHORT",
-        conviction_score=7.4,
+        conviction_score=0.74,
         summary="Netflix subscriber growth story is over. Ad tier economics do not pencil out at scale.",
         views_per_hour=8300.0,
         corroboration_count=1,
@@ -282,7 +282,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         ticker="TSLA",
         posters=[Poster(handle="ValueInvestor99", strategy="value investor")],
         direction="LONG",
-        conviction_score=6.1,
+        conviction_score=0.61,
         summary="TSLA energy business is worth more than the car business alone. Market ignoring it.",
         views_per_hour=5100.0,
         corroboration_count=1,
@@ -296,7 +296,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         ticker="NOVA",
         posters=[Poster(handle="hkuppy", strategy="macro trader")],
         direction="LONG",
-        conviction_score=4.2,
+        conviction_score=0.42,
         summary="Solar permitting reform is the real catalyst here. Consensus underestimates the timing.",
         views_per_hour=4200.0,
         corroboration_count=1,
@@ -310,7 +310,7 @@ DEMO_FIXTURE: list[MorningSignal] = [
         ticker="RIVN",
         posters=[Poster(handle="StockJabber", strategy="short seller")],
         direction="SHORT",
-        conviction_score=3.8,
+        conviction_score=0.38,
         summary="RIVN cash burn rate means dilution is coming faster than bulls expect. Run the math.",
         views_per_hour=2800.0,
         corroboration_count=1,

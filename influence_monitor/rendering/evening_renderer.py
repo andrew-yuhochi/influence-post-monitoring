@@ -10,16 +10,16 @@ Format per outcome block (ACT NOW):
   1. 📈 $FNMA
   D2D Return: +8.6%
   O2C Return: +6.4%
-  BUY @BillAckman - 82%
+  BUY @BillAckman - 0.82
   Excess-vol: 1.88 (vol: 4.2%) ✅
 
 Conflict block (two opposing signals for same ticker):
   5. 📈📉 $TSLA
   D2D Return: +3.9%
   O2C Return: +2.7%
-  BUY @CathieWood - 76%
+  BUY @CathieWood - 0.76
   Excess-vol: 1.07 (vol: 3.0%) ✅
-  SELL @CarsonBlock - 68%
+  SELL @CarsonBlock - 0.68
   Excess-vol: -1.07 (vol: 3.0%) ❌
 
 Watch List outcomes appear in a separate section (no "(monitored only)" suffix).
@@ -80,13 +80,10 @@ def _direction_emoji(direction: str) -> str:
 
 
 def _score_pct(final_score: float | None) -> str:
-    """Convert final_score (0.0–10.0 or 0.0–1.0) to a percentage string like '82%'."""
+    """Format final_score (0.0–1.0 stored in DB) as a 2-decimal string like '0.82'."""
     if final_score is None:
-        return "?%"
-    # Scores stored as 0–10 scale; normalise to 0–100
-    if final_score > 1.0:
-        return f"{round(final_score / 10 * 100)}%"
-    return f"{round(final_score * 100)}%"
+        return "?"
+    return f"{final_score:.2f}"
 
 
 def _excess_vol_line(
