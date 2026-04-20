@@ -553,6 +553,37 @@ class SignalRepository:
             [signal_date.isoformat(), tenant_id],
         )
 
+    def get_signals_for_date_range(
+        self,
+        start_date: date,
+        end_date: date,
+        tenant_id: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return all signals in the inclusive [start_date, end_date] range for a tenant.
+
+        Joins accounts so callers receive ``account_handle`` and
+        ``account_display_name`` on every row (mirrors get_signals_for_date).
+
+        Args:
+            start_date: First day of the range (inclusive).
+            end_date:   Last day of the range (inclusive).
+            tenant_id:  Tenant scope (default 1).
+
+        Returns:
+            List of signal rows as dicts, ordered by signal_date DESC then
+            final_score DESC so the most-recent highest-conviction signals
+            come first.
+        """
+        return self._execute(
+            """SELECT s.*, a.handle AS account_handle, a.display_name AS account_display_name,
+                      a.credibility_score AS account_credibility
+               FROM signals s
+               JOIN accounts a ON s.account_id = a.id
+               WHERE s.signal_date >= ? AND s.signal_date <= ? AND s.tenant_id = ?
+               ORDER BY s.signal_date DESC, s.final_score DESC""",
+            [start_date.isoformat(), end_date.isoformat(), tenant_id],
+        )
+
     # ------------------------------------------------------------------
     # Scoring config
     # ------------------------------------------------------------------
