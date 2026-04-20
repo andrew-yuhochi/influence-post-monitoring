@@ -1,12 +1,11 @@
-"""Morning pipeline orchestrator — TASK-010b.
+"""Pipeline orchestrator — TASK-010b (morning) + TASK-013 (evening).
 
 Top-level synchronous entry point for the influence-post-monitoring pipeline.
-Wires together all Milestone 2 components (AccountRegistry, TickerExtractor,
-ClaudeHaikuClient, ScoringEngine, ConflictResolver, AmplifierFetcher,
-MarketCapResolver, MessageRenderer, and WhatsApp delivery).
+Wires together all Milestone 2 and 3 components.
 
 CLI:
     python -m influence_monitor.pipeline morning [--dry-run] [--account-limit N] [--use-fixtures]
+    python -m influence_monitor.pipeline evening [--dry-run] [--use-fixtures]
 
 The orchestrator is fully synchronous from the outside; async twikit calls
 are wrapped with asyncio.run() at the ingestion call-site only.
@@ -33,6 +32,10 @@ from influence_monitor.ingestion.account_registry import AccountRegistry
 from influence_monitor.ingestion.base import RawPost
 from influence_monitor.ingestion.registry import SOURCE_REGISTRY
 from influence_monitor.market_data.trading_calendar import TradingCalendar
+from influence_monitor.market_data.yfinance_client import YFinanceClient
+from influence_monitor.outcome.outcome_engine import OutcomeEngine
+from influence_monitor.outcome.scorecard_aggregator import ScorecardAggregator
+from influence_monitor.rendering.evening_renderer import render_evening
 from influence_monitor.rendering.morning_renderer import (
     MorningSignal,
     Poster,
@@ -47,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 _FIXTURES_PATH = _PROJECT_ROOT / "tests" / "fixtures" / "sample_signals.json"
+_OUTCOMES_FIXTURES_PATH = _PROJECT_ROOT / "tests" / "fixtures" / "sample_outcomes.json"
 
 # Non-signal columns to strip before inserting into the signals table
 _FIXTURE_META_FIELDS = {
@@ -187,6 +191,20 @@ class PipelineOrchestrator:
             repo=repo,
             source=self._source,
             tenant_id=1,
+        )
+
+        # Market data client for outcome computation
+        self._market_client = YFinanceClient()
+
+        # Evening pipeline components
+        self._outcome_engine = OutcomeEngine(
+            market_client=self._market_client,
+            repo=repo,
+            trading_calendar=self._calendar,
+        )
+        self._scorecard_aggregator = ScorecardAggregator(
+            repo=repo,
+            trading_calendar=self._calendar,
         )
 
     # ------------------------------------------------------------------
@@ -903,6 +921,262 @@ class PipelineOrchestrator:
             raise
 
 
+    # ------------------------------------------------------------------
+    # Evening fixtures mode
+    # ------------------------------------------------------------------
+
+    def _run_evening_fixtures_mode(
+        self,
+        run_date: date,
+        dry_run: bool,
+    ) -> None:
+        """Load sample_outcomes.json, insert posts + signals (with outcome data), then
+        run ScorecardAggregator → render_evening → deliver.
+
+        Bypasses OutcomeEngine (outcomes are already populated in the fixture JSON).
+        """
+        logger.info("STEP [evening-fixtures] START — loading sample_outcomes.json")
+
+        raw_outcomes = json.loads(_OUTCOMES_FIXTURES_PATH.read_text())
+        today_str = run_date.isoformat()
+
+        # Ensure DB is initialised
+        self._repo.init_schema()
+        self._repo.seed(phone_e164=self._settings.recipient_phone_e164)
+
+        # Clear existing signals for today to avoid duplicate renders
+        if not dry_run:
+            self._repo._execute_write(
+                "DELETE FROM signals WHERE signal_date = ? AND tenant_id = 1",
+                [today_str],
+            )
+
+        accounts = self._repo.get_accounts_by_status("primary", tenant_id=1)
+        accounts_by_handle: dict[str, dict[str, Any]] = {
+            a["handle"].lower(): a for a in accounts
+        }
+
+        # Non-signal / non-outcome meta fields to strip before inserting signals
+        _OUTCOME_META_FIELDS = {
+            "_comment", "post_text", "posted_at", "account_handle",
+            "corroboration_count",
+        }
+
+        for sig in raw_outcomes:
+            handle = sig.get("account_handle", "BillAckman")
+            account = accounts_by_handle.get(handle.lower())
+            if account is None:
+                self._repo.upsert_account(
+                    tenant_id=1,
+                    handle=handle,
+                    display_name=handle,
+                    credibility_score=7.0,
+                    status="primary",
+                )
+                accounts = self._repo.get_accounts_by_status("primary", tenant_id=1)
+                accounts_by_handle = {a["handle"].lower(): a for a in accounts}
+                account = accounts_by_handle.get(handle.lower())
+
+            account_id = account["id"] if account else 1
+
+            posted_at_str = sig.get("posted_at", f"{today_str}T16:00:00Z")
+            try:
+                posted_at = datetime.fromisoformat(posted_at_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                posted_at = datetime.now(tz=timezone.utc)
+
+            post_id = self._repo.insert_post(
+                tenant_id=1,
+                account_id=account_id,
+                external_id=f"outcome-fixture-{uuid.uuid4().hex[:8]}",
+                source_type="fixture",
+                text=sig.get("post_text", ""),
+                posted_at=posted_at,
+                fetched_at=datetime.now(tz=timezone.utc),
+                view_count=sig.get("engagement_views"),
+                repost_count=sig.get("engagement_reposts"),
+            )
+            if post_id is None:
+                post_id = 1
+
+            signal_kwargs: dict[str, Any] = {
+                k: v for k, v in sig.items()
+                if k not in _OUTCOME_META_FIELDS
+            }
+            signal_kwargs["tenant_id"] = 1
+            signal_kwargs["user_id"] = 1
+            signal_kwargs["post_id"] = post_id
+            signal_kwargs["account_id"] = account_id
+            signal_kwargs["signal_date"] = today_str
+
+            self._repo.insert_signal(**signal_kwargs)
+
+        logger.info(
+            "STEP [evening-fixtures] DONE — inserted %d outcome signals",
+            len(raw_outcomes),
+        )
+
+    # ------------------------------------------------------------------
+    # Main entry: run_evening
+    # ------------------------------------------------------------------
+
+    def run_evening(
+        self,
+        run_date: date,
+        dry_run: bool = False,
+        use_fixtures: bool = False,
+    ) -> None:
+        """Execute the evening summary pipeline.
+
+        Steps:
+          1. Check trading day — skip entirely if not a trading day.
+          2. (If use_fixtures) Insert sample_outcomes.json into DB.
+          3. (If not use_fixtures) OutcomeEngine.compute_and_store(run_date).
+          4. ScorecardAggregator.top_n_posters + trading_days_with_signals.
+          5. render_evening.
+          6. Deliver via WhatsApp.
+          7. Upsert daily_summaries with run_type='evening'.
+
+        Parameters
+        ----------
+        run_date:
+            The date for which to run the evening pipeline (typically today).
+        dry_run:
+            Render to stdout; do not send WhatsApp or write DB.
+        use_fixtures:
+            Bypass OutcomeEngine; insert pre-computed outcomes from
+            tests/fixtures/sample_outcomes.json and run from step 4 onward.
+        """
+        start_ts = monotonic()
+        logger.info(
+            "run_evening START — date=%s dry_run=%s use_fixtures=%s",
+            run_date, dry_run, use_fixtures,
+        )
+
+        try:
+            # ------------------------------------------------------------------
+            # STEP 1 — Check trading day
+            # ------------------------------------------------------------------
+            if not self._calendar.is_trading_day(run_date):
+                logger.info(
+                    "run_evening: %s is not a trading day — skipping", run_date
+                )
+                return
+
+            # ------------------------------------------------------------------
+            # STEP 2 — Fixtures or real OutcomeEngine
+            # ------------------------------------------------------------------
+            if use_fixtures:
+                self._run_evening_fixtures_mode(run_date, dry_run=dry_run)
+            else:
+                logger.info("STEP 2 START — OutcomeEngine.compute_and_store")
+                self._outcome_engine.compute_and_store(run_date)
+                logger.info("STEP 2 DONE — outcome computation complete")
+
+            # ------------------------------------------------------------------
+            # STEP 3 — ScorecardAggregator
+            # ------------------------------------------------------------------
+            logger.info("STEP 3 START — ScorecardAggregator")
+            scorecard = self._scorecard_aggregator.top_n_posters(
+                as_of=run_date,
+                window_days=30,
+                n=5,
+                tenant_id=1,
+            )
+            trading_days_scored = self._scorecard_aggregator.trading_days_with_signals(
+                as_of=run_date,
+                window_days=30,
+                tenant_id=1,
+            )
+            logger.info(
+                "STEP 3 DONE — %d scorecard rows, %d trading days scored",
+                len(scorecard), trading_days_scored,
+            )
+
+            # ------------------------------------------------------------------
+            # STEP 4 — Load signals for today
+            # ------------------------------------------------------------------
+            logger.info("STEP 4 START — loading signals for %s", run_date)
+            signals = self._repo.get_signals_for_date(
+                signal_date=run_date,
+                tenant_id=1,
+            )
+            logger.info("STEP 4 DONE — %d signals loaded", len(signals))
+
+            # ------------------------------------------------------------------
+            # STEP 5 — render_evening
+            # ------------------------------------------------------------------
+            logger.info("STEP 5 START — rendering evening summary")
+            messages = render_evening(
+                signals=signals,
+                scorecard=scorecard,
+                trading_days_scored=trading_days_scored,
+                as_of_date=run_date,
+            )
+            logger.info("STEP 5 DONE — %d message part(s) rendered", len(messages))
+
+            # ------------------------------------------------------------------
+            # STEP 6 — Deliver
+            # ------------------------------------------------------------------
+            logger.info("STEP 6 START — WhatsApp delivery")
+            for msg in messages:
+                self._deliver(msg, kind="evening", dry_run=dry_run)
+            logger.info("STEP 6 DONE — delivery complete")
+
+            # ------------------------------------------------------------------
+            # STEP 7 — Write daily_summaries
+            # ------------------------------------------------------------------
+            duration = monotonic() - start_ts
+
+            # Compute avg_excess_vol across today's scored signals
+            scored = [
+                s for s in signals
+                if s.get("excess_vol_score") is not None
+            ]
+            avg_excess_vol: float | None = None
+            if scored:
+                avg_excess_vol = round(
+                    sum(float(s["excess_vol_score"]) for s in scored) / len(scored),
+                    6,
+                )
+
+            if not dry_run:
+                self._repo.upsert_daily_summary(
+                    tenant_id=1,
+                    summary_date=run_date.isoformat(),
+                    run_type="evening",
+                    signals_scored=len(signals),
+                    avg_excess_vol=avg_excess_vol,
+                    pipeline_status="ok",
+                    duration_seconds=round(duration, 2),
+                )
+
+            logger.info(
+                "run_evening DONE — %.1fs | signals=%d avg_excess_vol=%s",
+                duration, len(signals), avg_excess_vol,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Unhandled evening pipeline exception: %s", exc)
+            _send_operational_message(
+                self._settings,
+                f"⚠️ Evening Pipeline FAILED — {run_date}\n"
+                f"Error: {type(exc).__name__}: {str(exc)[:200]}\n"
+                f"Check Actions logs.",
+                dry_run=dry_run,
+            )
+            if not dry_run:
+                self._repo.upsert_daily_summary(
+                    tenant_id=1,
+                    summary_date=run_date.isoformat(),
+                    run_type="evening",
+                    pipeline_status="failed",
+                    error_message=f"{type(exc).__name__}: {str(exc)[:500]}",
+                    duration_seconds=round(monotonic() - start_ts, 2),
+                )
+            raise
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -914,6 +1188,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # ------------------------------------------------------------------
+    # morning subcommand
+    # ------------------------------------------------------------------
     morning_parser = subparsers.add_parser("morning", help="Run the morning alert pipeline")
     morning_parser.add_argument(
         "--dry-run",
@@ -934,6 +1211,32 @@ def _build_parser() -> argparse.ArgumentParser:
             "Load pre-scored signals from tests/fixtures/sample_signals.json. "
             "Bypasses twikit and Claude; runs rendering + delivery only. "
             "Works on any day without live credentials."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # evening subcommand
+    # ------------------------------------------------------------------
+    evening_parser = subparsers.add_parser("evening", help="Run the evening summary pipeline")
+    evening_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Render to stdout only; do not write to DB or send WhatsApp",
+    )
+    evening_parser.add_argument(
+        "--account-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Accepted for CLI parity with morning; not used by evening pipeline",
+    )
+    evening_parser.add_argument(
+        "--use-fixtures",
+        action="store_true",
+        help=(
+            "Insert pre-computed outcomes from tests/fixtures/sample_outcomes.json "
+            "into DB, then run ScorecardAggregator → render → deliver. "
+            "Works on any day without live market data."
         ),
     )
 
@@ -968,6 +1271,12 @@ def main() -> None:
             orchestrator.run_morning(
                 run_date=date.today(),
                 account_limit=args.account_limit,
+                dry_run=args.dry_run,
+                use_fixtures=args.use_fixtures,
+            )
+        elif args.command == "evening":
+            orchestrator.run_evening(
+                run_date=date.today(),
                 dry_run=args.dry_run,
                 use_fixtures=args.use_fixtures,
             )
