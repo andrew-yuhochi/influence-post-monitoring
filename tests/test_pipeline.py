@@ -799,7 +799,8 @@ class TestEveningPipeline:
     def test_evening_dry_run_renders_outcome_blocks(
         self, settings: Settings, repo: SignalRepository
     ) -> None:
-        """C1: evening dry-run with seeded signals renders D2D Return/O2C Return/excess-vol keywords."""
+        """C1: evening dry-run with seeded signals renders D2D Return/O2C Return/excess-vol
+        in new format: stock header first, returns second, account+score third, excess-vol last."""
         signal_date = _TRADING_DATE.isoformat()
         _seed_outcome_signals(repo, signal_date, _ACT_NOW_WITH_OUTCOMES + _WATCH_WITH_OUTCOMES)
 
@@ -822,6 +823,102 @@ class TestEveningPipeline:
         assert "ACT NOW" in full_text, "Expected 'ACT NOW' section header"
         assert "ACT NOW OUTCOMES" not in full_text, "Old section header must be gone"
         assert len(full_text) < 4_000, f"Message too long: {len(full_text)} chars"
+
+        # New format: stock ticker on its own header line (no label/handle on first line)
+        # e.g. "1. 📈 $AAPL" not "1. 📈 $AAPL BUY @handle - XX%"
+        lines = full_text.split("\n") if "\n" in full_text else full_text.split(" ")
+        full_multiline = "\n".join(delivered)
+        # Verify AAPL header line has no BUY/SELL on it
+        for line in full_multiline.split("\n"):
+            if "$AAPL" in line and line.strip().startswith(("1.", "2.", "3.", "4.", "5.")):
+                assert "BUY" not in line, f"New format: BUY must not appear on stock header line: {line!r}"
+                assert "SELL" not in line, f"New format: SELL must not appear on stock header line: {line!r}"
+
+    @patch("influence_monitor.pipeline.SOURCE_REGISTRY", {"twitter_twikit": MagicMock(return_value=MagicMock())})
+    def test_evening_act_now_capped_at_five(
+        self, settings: Settings, repo: SignalRepository
+    ) -> None:
+        """C1b: ACT NOW section is capped at 5 slots even when more signals are present."""
+        signal_date = _TRADING_DATE.isoformat()
+        # 6 ACT_NOW signals: only first 5 slots should appear
+        extra_act_now = _ACT_NOW_WITH_OUTCOMES + [
+            {
+                "ticker": "META",
+                "tier": "ACT_NOW",
+                "direction": "LONG",
+                "conviction_score": 5.0,
+                "final_score": 5.0,
+                "score_amplifier": None,
+                "key_claim": "Meta AI monetisation",
+                "prev_close": 500.0,
+                "today_open": 502.0,
+                "today_close": 508.0,
+                "overnight_return": 0.012,
+                "tradeable_return": 0.012,
+                "spy_return": 0.003,
+                "stock_20d_vol": 0.02,
+                "excess_vol_score": 0.9,
+                "price_data_source": "yfinance",
+            },
+            {
+                "ticker": "NVDA",
+                "tier": "ACT_NOW",
+                "direction": "LONG",
+                "conviction_score": 4.8,
+                "final_score": 4.8,
+                "score_amplifier": None,
+                "key_claim": "NVDA data-centre dominance",
+                "prev_close": 900.0,
+                "today_open": 905.0,
+                "today_close": 920.0,
+                "overnight_return": 0.011,
+                "tradeable_return": 0.011,
+                "spy_return": 0.003,
+                "stock_20d_vol": 0.025,
+                "excess_vol_score": 0.7,
+                "price_data_source": "yfinance",
+            },
+            {
+                "ticker": "AMZN",
+                "tier": "ACT_NOW",
+                "direction": "LONG",
+                "conviction_score": 4.5,
+                "final_score": 4.5,
+                "score_amplifier": None,
+                "key_claim": "AWS re-acceleration",
+                "prev_close": 180.0,
+                "today_open": 181.0,
+                "today_close": 183.0,
+                "overnight_return": 0.008,
+                "tradeable_return": 0.008,
+                "spy_return": 0.003,
+                "stock_20d_vol": 0.018,
+                "excess_vol_score": 0.5,
+                "price_data_source": "yfinance",
+            },
+        ]
+        _seed_outcome_signals(repo, signal_date, extra_act_now)
+
+        orch = PipelineOrchestrator(settings=settings, repo=repo)
+        delivered: list[str] = []
+
+        def fake_deliver(text: str, kind: str, dry_run: bool) -> None:
+            delivered.append(text)
+
+        with patch.object(orch, "_deliver", fake_deliver):
+            with patch.object(orch._calendar, "is_trading_day", return_value=True):
+                with patch.object(orch._outcome_engine, "compute_and_store"):
+                    orch.run_evening(run_date=_TRADING_DATE, dry_run=True, use_fixtures=False)
+
+        assert delivered, "Expected at least one delivered message"
+        full_text = "\n".join(delivered)
+        # Count numbered slots in ACT NOW section (lines like "1. 📈 $TICKER")
+        import re
+        act_section = full_text.split("━━━ WATCH LIST ━━━")[0] if "WATCH LIST" in full_text else full_text
+        slot_numbers = re.findall(r"^\d+\. ", act_section, re.MULTILINE)
+        assert len(slot_numbers) <= 5, (
+            f"ACT NOW must be capped at 5 slots; found {len(slot_numbers)}: {slot_numbers}"
+        )
 
     @patch("influence_monitor.pipeline.SOURCE_REGISTRY", {"twitter_twikit": MagicMock(return_value=MagicMock())})
     def test_evening_use_fixtures_runs_any_day(

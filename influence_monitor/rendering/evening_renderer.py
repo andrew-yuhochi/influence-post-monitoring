@@ -7,18 +7,23 @@ Entry point: render_evening(signals, scorecard, trading_days_scored, as_of_date)
 Returns a list[str] — one element normally; two if the message exceeds 4,000 chars.
 
 Format per outcome block (ACT NOW):
-  1. 📈 $FNMA BUY - 82%
+  1. 📈 $FNMA
   D2D Return: +8.6%
   O2C Return: +6.4%
+  BUY @BillAckman - 82%
   Excess-vol: 1.88 (vol: 4.2%) ✅
 
 Conflict block (two opposing signals for same ticker):
-  5. 📈📉 $TSLA CONFLICT
+  5. 📈📉 $TSLA
+  D2D Return: +3.9%
+  O2C Return: +2.7%
   BUY @CathieWood - 76%
-  D2D Return: +8.6%
-  ...
+  Excess-vol: 1.07 (vol: 3.0%) ✅
+  SELL @CarsonBlock - 68%
+  Excess-vol: -1.07 (vol: 3.0%) ❌
 
 Watch List outcomes appear in a separate section (no "(monitored only)" suffix).
+ACT NOW section is capped at 5 slots (mirrors morning alert cap).
 No disclaimer footer (PRD §8 override — personal-use PoC).
 """
 from __future__ import annotations
@@ -138,12 +143,10 @@ def _render_single_block(sig: dict[str, Any]) -> list[str]:
 
     lines: list[str] = []
 
-    # Header: emoji $TICKER LABEL - XX%
-    if handle:
-        lines.append(f"{emoji} ${ticker} {label} @{handle} - {score_str}")
-    else:
-        lines.append(f"{emoji} ${ticker} {label} - {score_str}")
+    # Header: emoji $TICKER (stock first)
+    lines.append(f"{emoji} ${ticker}")
 
+    # Returns second
     if price_unavailable:
         lines.append("D2D Return: —")
         lines.append("O2C Return: —")
@@ -151,6 +154,13 @@ def _render_single_block(sig: dict[str, Any]) -> list[str]:
         lines.append(f"D2D Return: {_pct(overnight)}")
         lines.append(f"O2C Return: {_pct(tradeable)}")
 
+    # Account + score third
+    if handle:
+        lines.append(f"{label} @{handle} - {score_str}")
+    else:
+        lines.append(f"{label} - {score_str}")
+
+    # Excess-vol last
     lines.append(_excess_vol_line(excess_vol, stock_vol, price_unavailable))
 
     # SHORT annotation (only when NOT price unavailable, only _(short = gain)_ kept)
@@ -167,21 +177,52 @@ def _render_conflict_block_evening(
     """Return lines (without numbering) for a conflict block.
 
     sig_a should have the higher conviction/final_score (sorted by caller).
+
+    New format:
+      📈📉 $TICKER
+      D2D Return: +X.X%   (shared — same stock move for both sides)
+      O2C Return: +X.X%
+      BUY @handle - XX%
+      Excess-vol: X.XX (vol: X.X%) ✅
+      SELL @handle - XX%
+      Excess-vol: -X.XX (vol: X.X%) ❌
     """
     ticker = sig_a.get("ticker", "???")
-    lines: list[str] = [f"📈📉 ${ticker} CONFLICT"]
+    lines: list[str] = [f"📈📉 ${ticker}"]
 
+    # Use sig_a's price data for the shared D2D / O2C lines (both sides have the
+    # same underlying stock movement).
+    overnight_a = sig_a.get("overnight_return")
+    tradeable_a = sig_a.get("tradeable_return")
+    price_src_a = (sig_a.get("price_data_source") or "").lower()
+    excess_vol_a = sig_a.get("excess_vol_score")
+
+    shared_price_unavailable = (
+        price_src_a == "unavailable"
+        or overnight_a is None
+        or tradeable_a is None
+        or excess_vol_a is None
+    )
+
+    if shared_price_unavailable:
+        lines.append("D2D Return: —")
+        lines.append("O2C Return: —")
+    else:
+        lines.append(f"D2D Return: {_pct(overnight_a)}")
+        lines.append(f"O2C Return: {_pct(tradeable_a)}")
+
+    # Per-account: label+score then excess-vol (no blank line between sides)
     for sig in (sig_a, sig_b):
         direction = (sig.get("direction") or "LONG").upper()
         label = _direction_label(direction)
         final_score = sig.get("final_score")
         score_str = _score_pct(final_score)
         handle = sig.get("account_handle") or sig.get("handle") or ""
-        overnight = sig.get("overnight_return")
-        tradeable = sig.get("tradeable_return")
         stock_vol = sig.get("stock_20d_vol")
         excess_vol = sig.get("excess_vol_score")
+        overnight = sig.get("overnight_return")
         price_src = (sig.get("price_data_source") or "").lower()
+        tradeable = sig.get("tradeable_return")
 
         price_unavailable = (
             price_src == "unavailable"
@@ -190,30 +231,18 @@ def _render_conflict_block_evening(
             or excess_vol is None
         )
 
-        # Sub-header line for each side of the conflict
+        # Account + score line
         if handle:
             lines.append(f"{label} @{handle} - {score_str}")
         else:
             lines.append(f"{label} - {score_str}")
 
-        if price_unavailable:
-            lines.append("D2D Return: —")
-            lines.append("O2C Return: —")
-        else:
-            lines.append(f"D2D Return: {_pct(overnight)}")
-            lines.append(f"O2C Return: {_pct(tradeable)}")
-
+        # Per-account excess-vol line
         lines.append(_excess_vol_line(excess_vol, stock_vol, price_unavailable))
 
-        # SHORT annotation — only _(short = gain)_ kept; _(short went up)_ removed
+        # SHORT annotation — only _(short = gain)_ kept
         if not price_unavailable and direction in ("SHORT", "SELL") and overnight is not None and overnight < 0:
             lines.append("_(short = gain)_")
-
-        lines.append("")  # blank line between conflict sides
-
-    # Remove trailing blank line
-    if lines and lines[-1] == "":
-        lines.pop()
 
     return lines
 
@@ -286,8 +315,8 @@ def render_evening(
     act_now_sigs = [s for s in signals if (s.get("tier") or "").upper() == "ACT_NOW"]
     watch_sigs = [s for s in signals if (s.get("tier") or "").upper() == "WATCH"]
 
-    # Group opposing-direction pairs into conflict slots
-    act_slots = _group_signals(act_now_sigs)
+    # Group opposing-direction pairs into conflict slots; cap ACT NOW at 5 (mirrors morning)
+    act_slots = _group_signals(act_now_sigs)[:5]
     watch_slots = _group_signals(watch_sigs)
 
     # Build ACT NOW section
