@@ -84,7 +84,7 @@ class _LibsqlBackend:
         if isinstance(v, int):
             return {"type": "integer", "value": str(v)}
         if isinstance(v, float):
-            return {"type": "real", "value": str(v)}
+            return {"type": "float", "value": str(v)}
         if isinstance(v, bytes):
             import base64
             return {"type": "blob", "value": base64.b64encode(v).decode()}
