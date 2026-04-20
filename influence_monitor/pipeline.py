@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import sys
-import traceback
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -881,7 +880,6 @@ class PipelineOrchestrator:
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unhandled pipeline exception: %s", exc)
-            tb_text = traceback.format_exc()
             _send_operational_message(
                 self._settings,
                 f"⚠️ Pipeline FAILED — {run_date} morning\n"

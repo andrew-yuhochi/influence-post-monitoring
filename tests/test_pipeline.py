@@ -366,3 +366,144 @@ class TestDeliveryRegistry:
     def test_registry_values_are_classes(self) -> None:
         for name, cls in DELIVERY_REGISTRY.items():
             assert callable(cls), f"{name} delivery cls is not callable"
+
+
+# ---------------------------------------------------------------------------
+# Test: AC-6 — factor columns round-trip through DB (insert → SELECT back)
+# ---------------------------------------------------------------------------
+
+class TestAC6FactorColumnsRoundTrip:
+    """AC-6: All signals persisted with F1, F2a/F2b, F3, F5 populated;
+    F4 populated only for ACT_NOW.
+
+    Calls repo.insert_post() + repo.insert_signal() directly (the same
+    codepath used by the pipeline persist loop) and reads the row back via
+    get_signals_for_date() to confirm every factor column lands correctly.
+    """
+
+    def _setup_post(self, repo: SignalRepository) -> tuple[int, int]:
+        """Return (account_id, post_id) for use in insert_signal().
+
+        Uses the first seeded primary account and inserts a synthetic post row.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+
+        accounts = repo.get_accounts_by_status("primary", tenant_id=1)
+        assert accounts, "No seeded primary accounts found"
+        account_id: int = accounts[0]["id"]
+
+        post_id = repo.insert_post(
+            tenant_id=1,
+            account_id=account_id,
+            external_id="test-ext-id-ac6",
+            source_type="twitter_twikit",
+            text="Synthetic test post for AC-6 round-trip",
+            posted_at=_dt(2026, 4, 21, 9, 0, 0, tzinfo=_tz.utc),
+            fetched_at=_dt(2026, 4, 21, 9, 1, 0, tzinfo=_tz.utc),
+            view_count=50000,
+            repost_count=2000,
+        )
+        assert post_id is not None, "insert_post should return a rowid"
+        return account_id, post_id
+
+    def _insert_signal(
+        self,
+        repo: SignalRepository,
+        *,
+        account_id: int,
+        post_id: int,
+        tier: str,
+        score_amplifier: float | None,
+        signal_date: str = "2026-04-21",
+    ) -> None:
+        repo.insert_signal(
+            tenant_id=1,
+            user_id=1,
+            post_id=post_id,
+            account_id=account_id,
+            signal_date=signal_date,
+            ticker="AAPL",
+            extraction_confidence="HIGH",
+            market_cap_class="Mega",
+            direction="LONG",
+            conviction_level=4,
+            argument_quality="STRONG",
+            time_horizon="SHORT",
+            market_moving_potential=1,
+            key_claim="Strong buy signal",
+            rationale="Bull case intact",
+            llm_model_version="claude-3-5-sonnet",
+            llm_raw_response=None,
+            llm_input_tokens=100,
+            llm_output_tokens=50,
+            score_credibility=8.5,            # F1
+            score_virality_abs=7.0,           # F2a
+            score_virality_vel=None,          # F2b — None for ACT_NOW per TDD
+            score_consensus=6.0,              # F3
+            score_amplifier=score_amplifier,  # F4 — tier-dependent
+            liquidity_modifier=1.0,
+            conviction_score=7.8,
+            direction_flip=0,
+            conflict_group=None,
+            penalty_applied=0.0,
+            final_score=7.8,                  # F5
+            tier=tier,
+            engagement_views=50000,
+            engagement_reposts=2000,
+            views_per_hour=4500.0,
+        )
+
+    def test_act_now_signal_factor_columns_persisted(
+        self, repo: SignalRepository
+    ) -> None:
+        """ACT_NOW signal: F1, F2a, F3, F5 set; F4 (score_amplifier) set."""
+        from datetime import date as _date
+
+        account_id, post_id = self._setup_post(repo)
+        self._insert_signal(
+            repo, account_id=account_id, post_id=post_id,
+            tier="ACT_NOW", score_amplifier=3.2,
+        )
+        rows = repo.get_signals_for_date(_date(2026, 4, 21), tenant_id=1)
+        assert len(rows) == 1, "Expected exactly one signal row"
+        row = rows[0]
+
+        # F1 — credibility
+        assert row["score_credibility"] == pytest.approx(8.5)
+        # F2a — virality absolute
+        assert row["score_virality_abs"] == pytest.approx(7.0)
+        # F3 — consensus
+        assert row["score_consensus"] == pytest.approx(6.0)
+        # F5 — final score
+        assert row["final_score"] == pytest.approx(7.8)
+        # F4 — amplifier populated for ACT_NOW
+        assert row["score_amplifier"] is not None
+        assert row["score_amplifier"] == pytest.approx(3.2)
+
+    def test_watch_signal_factor_columns_persisted(
+        self, repo: SignalRepository
+    ) -> None:
+        """WATCH signal: F1, F2a, F3, F5 set; F4 (score_amplifier) is NULL."""
+        from datetime import date as _date
+
+        account_id, post_id = self._setup_post(repo)
+        self._insert_signal(
+            repo, account_id=account_id, post_id=post_id,
+            tier="WATCH", score_amplifier=None,
+        )
+        rows = repo.get_signals_for_date(_date(2026, 4, 21), tenant_id=1)
+        assert len(rows) == 1, "Expected exactly one signal row"
+        row = rows[0]
+
+        # F1 — credibility
+        assert row["score_credibility"] == pytest.approx(8.5)
+        # F2a — virality absolute
+        assert row["score_virality_abs"] == pytest.approx(7.0)
+        # F3 — consensus
+        assert row["score_consensus"] == pytest.approx(6.0)
+        # F5 — final score
+        assert row["final_score"] == pytest.approx(7.8)
+        # F4 — amplifier must be NULL for WATCH
+        assert row["score_amplifier"] is None, (
+            f"score_amplifier should be NULL for WATCH signal, got {row['score_amplifier']!r}"
+        )
