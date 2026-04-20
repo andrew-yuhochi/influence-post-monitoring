@@ -799,7 +799,7 @@ class TestEveningPipeline:
     def test_evening_dry_run_renders_outcome_blocks(
         self, settings: Settings, repo: SignalRepository
     ) -> None:
-        """C1: evening dry-run with seeded signals renders overnight/tradeable/excess-vol keywords."""
+        """C1: evening dry-run with seeded signals renders D2D Return/O2C Return/excess-vol keywords."""
         signal_date = _TRADING_DATE.isoformat()
         _seed_outcome_signals(repo, signal_date, _ACT_NOW_WITH_OUTCOMES + _WATCH_WITH_OUTCOMES)
 
@@ -816,9 +816,11 @@ class TestEveningPipeline:
 
         assert delivered, "Expected at least one delivered message"
         full_text = " ".join(delivered)
-        assert "overnight" in full_text.lower(), "Expected 'overnight' in rendered output"
-        assert "tradeable" in full_text.lower(), "Expected 'tradeable' in rendered output"
-        assert "excess-vol" in full_text.lower(), "Expected 'excess-vol' in rendered output"
+        assert "D2D Return" in full_text, "Expected 'D2D Return' in rendered output"
+        assert "O2C Return" in full_text, "Expected 'O2C Return' in rendered output"
+        assert "Excess-vol" in full_text, "Expected 'Excess-vol' in rendered output"
+        assert "ACT NOW" in full_text, "Expected 'ACT NOW' section header"
+        assert "ACT NOW OUTCOMES" not in full_text, "Old section header must be gone"
         assert len(full_text) < 4_000, f"Message too long: {len(full_text)} chars"
 
     @patch("influence_monitor.pipeline.SOURCE_REGISTRY", {"twitter_twikit": MagicMock(return_value=MagicMock())})
@@ -840,7 +842,7 @@ class TestEveningPipeline:
 
         assert delivered, "Expected at least one delivered message on non-trading day with --use-fixtures"
         full_text = " ".join(delivered)
-        assert "overnight" in full_text.lower() or "Evening Summary" in full_text, (
+        assert "D2D Return" in full_text or "Evening Summary" in full_text, (
             "Expected evening summary content in rendered output"
         )
 
@@ -899,13 +901,11 @@ class TestEveningPipeline:
 
         assert delivered, "Expected at least one delivered message"
         full_text = " ".join(delivered)
-        # When excess_vol_score is None, renderer emits "price data unavailable" per signal;
-        # "No outcomes to report today." only appears when act_blocks is completely empty
-        # (i.e. _render_outcome_block returns None for all signals, which requires a
-        # different code path). The always-send rule guarantees a message is delivered.
+        # When excess_vol_score is None, renderer emits "price unavailable" per signal.
+        # The always-send rule guarantees a message is delivered.
         assert "Evening Summary" in full_text, (
             f"Expected 'Evening Summary' header in output. Got: {full_text[:300]}"
         )
-        assert "price data unavailable" in full_text or "No outcomes to report today." in full_text, (
+        assert "price unavailable" in full_text or "No outcomes to report today." in full_text, (
             f"Expected no-outcome indicator in output. Got: {full_text[:300]}"
         )

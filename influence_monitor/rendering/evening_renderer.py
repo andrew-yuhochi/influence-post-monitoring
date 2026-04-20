@@ -1,21 +1,30 @@
-"""Evening summary composer for WhatsApp delivery — TASK-013.
+"""Evening summary composer for WhatsApp delivery — TASK-013 / TASK-013b overhaul.
 
-Renders per-stock outcome blocks (overnight / tradeable / excess-vol) and the
-30-day per-poster scorecard from ScorecardAggregator output.
+Renders per-stock outcome blocks and the 30-day per-poster scorecard from
+ScorecardAggregator output.
 
 Entry point: render_evening(signals, scorecard, trading_days_scored, as_of_date)
 Returns a list[str] — one element normally; two if the message exceeds 4,000 chars.
 
 Format per outcome block (ACT NOW):
-  $TICKER +X.X% overnight / +X.X% tradeable / +X.XX excess-vol (SPY: +X.X% | vol: X.X%)
-  _(short = gain)_ or _(short went up)_   [SHORT only]
+  1. 📈 $FNMA BUY - 82%
+  D2D Return: +8.6%
+  O2C Return: +6.4%
+  Excess-vol: 1.88 (vol: 4.2%) ✅
 
-Watch List outcomes appear in a separate section.
+Conflict block (two opposing signals for same ticker):
+  5. 📈📉 $TSLA CONFLICT
+  BUY @CathieWood - 76%
+  D2D Return: +8.6%
+  ...
+
+Watch List outcomes appear in a separate section (no "(monitored only)" suffix).
 No disclaimer footer (PRD §8 override — personal-use PoC).
 """
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import date
 from typing import Any
 
@@ -23,10 +32,17 @@ logger = logging.getLogger(__name__)
 
 _CHAR_LIMIT = 4_000
 
+# Opposing-direction pairs (mirrors morning_renderer._OPPOSING)
+_OPPOSING = {("LONG", "SHORT"), ("SHORT", "LONG"), ("BUY", "SELL"), ("SELL", "BUY")}
+
 
 # ---------------------------------------------------------------------------
-# Formatting helpers
+# Helpers
 # ---------------------------------------------------------------------------
+
+def _are_opposing(dir_a: str, dir_b: str) -> bool:
+    return (dir_a.upper(), dir_b.upper()) in _OPPOSING
+
 
 def _pct(value: float, decimals: int = 1) -> str:
     """Format a decimal fraction as a signed percentage string.
@@ -40,60 +56,193 @@ def _pct(value: float, decimals: int = 1) -> str:
     return f"{sign}{pct:.{decimals}f}%"
 
 
-def _evol(value: float) -> str:
-    """Format excess-vol as a signed two-decimal number.
+def _direction_label(direction: str) -> str:
+    d = direction.upper()
+    if d in ("LONG", "BUY"):
+        return "BUY"
+    if d in ("SHORT", "SELL"):
+        return "SELL"
+    return direction.upper()
 
-    Examples:
-        1.878282 → '+1.88'
-        -0.993297 → '-0.99'
+
+def _direction_emoji(direction: str) -> str:
+    d = direction.upper()
+    if d in ("LONG", "BUY"):
+        return "📈"
+    if d in ("SHORT", "SELL"):
+        return "📉"
+    return ""
+
+
+def _score_pct(final_score: float | None) -> str:
+    """Convert final_score (0.0–10.0 or 0.0–1.0) to a percentage string like '82%'."""
+    if final_score is None:
+        return "?%"
+    # Scores stored as 0–10 scale; normalise to 0–100
+    if final_score > 1.0:
+        return f"{round(final_score / 10 * 100)}%"
+    return f"{round(final_score * 100)}%"
+
+
+def _excess_vol_line(
+    excess_vol: float | None,
+    stock_vol: float | None,
+    price_unavailable: bool,
+) -> str:
+    """Render the Excess-vol line.
+
+    Rules:
+    - price unavailable → 'Excess-vol: — (price unavailable)'
+    - abs(excess_vol) >= 2 → wrap with ⭐ stars
+    - excess_vol >= 0 → trailing ✅
+    - excess_vol < 0  → trailing ❌
     """
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value:.2f}"
+    if price_unavailable or excess_vol is None:
+        return "Excess-vol: — (price unavailable)"
+
+    vol_str = f"{stock_vol * 100:.1f}%" if stock_vol is not None else "?%"
+    ev_val = f"{excess_vol:.2f}"
+    tail = "✅" if excess_vol >= 0 else "❌"
+
+    if abs(excess_vol) >= 2:
+        return f"Excess-vol: ⭐ {ev_val} (vol: {vol_str}) ⭐"
+    return f"Excess-vol: {ev_val} (vol: {vol_str}) {tail}"
 
 
-def _render_outcome_block(sig: dict[str, Any]) -> str | None:
-    """Render a single signal outcome block.
+def _render_single_block(sig: dict[str, Any]) -> list[str]:
+    """Return lines (without numbering) for a single signal block.
 
-    Returns None if price data is unavailable or excess_vol_score is None.
+    Always returns lines — never returns None.  Signals with missing price data
+    are shown with 'Excess-vol: — (price unavailable)'.
     """
+    ticker = sig.get("ticker", "???")
+    direction = (sig.get("direction") or "LONG").upper()
+    final_score = sig.get("final_score")
     overnight = sig.get("overnight_return")
     tradeable = sig.get("tradeable_return")
-    spy_ret = sig.get("spy_return")
     stock_vol = sig.get("stock_20d_vol")
     excess_vol = sig.get("excess_vol_score")
-    direction = (sig.get("direction") or "LONG").upper()
-    ticker = sig.get("ticker", "???")
-    price_src = sig.get("price_data_source") or ""
+    price_src = (sig.get("price_data_source") or "").lower()
+    handle = sig.get("account_handle") or sig.get("handle") or ""
 
-    # Price data unavailable
-    if price_src == "unavailable" or any(
-        v is None for v in (overnight, tradeable, spy_ret, stock_vol, excess_vol)
-    ):
-        return f"*${ticker}* — price data unavailable"
+    price_unavailable = (
+        price_src == "unavailable"
+        or overnight is None
+        or tradeable is None
+        or excess_vol is None
+    )
+
+    label = _direction_label(direction)
+    emoji = _direction_emoji(direction)
+    score_str = _score_pct(final_score)
 
     lines: list[str] = []
 
-    # Main metrics line
-    spy_str = _pct(spy_ret, 1)
-    vol_str = f"{stock_vol * 100:.1f}%"
-    metrics = (
-        f"*${ticker}* "
-        f"{_pct(overnight)} overnight / "
-        f"{_pct(tradeable)} tradeable / "
-        f"{_evol(excess_vol)} excess-vol "
-        f"(SPY: {spy_str} | vol: {vol_str})"
-    )
-    lines.append(metrics)
+    # Header: emoji $TICKER LABEL - XX%
+    if handle:
+        lines.append(f"{emoji} ${ticker} {label} @{handle} - {score_str}")
+    else:
+        lines.append(f"{emoji} ${ticker} {label} - {score_str}")
 
-    # SHORT annotation
-    if direction == "SHORT":
-        # Stock went down overnight → gain for short
-        if overnight < 0:
-            lines.append("_(short = gain)_")
+    if price_unavailable:
+        lines.append("D2D Return: —")
+        lines.append("O2C Return: —")
+    else:
+        lines.append(f"D2D Return: {_pct(overnight)}")
+        lines.append(f"O2C Return: {_pct(tradeable)}")
+
+    lines.append(_excess_vol_line(excess_vol, stock_vol, price_unavailable))
+
+    # SHORT annotation (only when NOT price unavailable, only _(short = gain)_ kept)
+    if not price_unavailable and direction in ("SHORT", "SELL") and overnight is not None and overnight < 0:
+        lines.append("_(short = gain)_")
+
+    return lines
+
+
+def _render_conflict_block_evening(
+    sig_a: dict[str, Any],
+    sig_b: dict[str, Any],
+) -> list[str]:
+    """Return lines (without numbering) for a conflict block.
+
+    sig_a should have the higher conviction/final_score (sorted by caller).
+    """
+    ticker = sig_a.get("ticker", "???")
+    lines: list[str] = [f"📈📉 ${ticker} CONFLICT"]
+
+    for sig in (sig_a, sig_b):
+        direction = (sig.get("direction") or "LONG").upper()
+        label = _direction_label(direction)
+        final_score = sig.get("final_score")
+        score_str = _score_pct(final_score)
+        handle = sig.get("account_handle") or sig.get("handle") or ""
+        overnight = sig.get("overnight_return")
+        tradeable = sig.get("tradeable_return")
+        stock_vol = sig.get("stock_20d_vol")
+        excess_vol = sig.get("excess_vol_score")
+        price_src = (sig.get("price_data_source") or "").lower()
+
+        price_unavailable = (
+            price_src == "unavailable"
+            or overnight is None
+            or tradeable is None
+            or excess_vol is None
+        )
+
+        # Sub-header line for each side of the conflict
+        if handle:
+            lines.append(f"{label} @{handle} - {score_str}")
         else:
-            lines.append("_(short went up)_")
+            lines.append(f"{label} - {score_str}")
 
-    return "\n".join(lines)
+        if price_unavailable:
+            lines.append("D2D Return: —")
+            lines.append("O2C Return: —")
+        else:
+            lines.append(f"D2D Return: {_pct(overnight)}")
+            lines.append(f"O2C Return: {_pct(tradeable)}")
+
+        lines.append(_excess_vol_line(excess_vol, stock_vol, price_unavailable))
+
+        # SHORT annotation — only _(short = gain)_ kept; _(short went up)_ removed
+        if not price_unavailable and direction in ("SHORT", "SELL") and overnight is not None and overnight < 0:
+            lines.append("_(short = gain)_")
+
+        lines.append("")  # blank line between conflict sides
+
+    # Remove trailing blank line
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    return lines
+
+
+def _group_signals(
+    signals: list[dict[str, Any]],
+) -> list[dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]]:
+    """Group signals by ticker.
+
+    When exactly 2 signals share a ticker and have opposing directions, merge
+    them into a (high_score, low_score) tuple that renders as one conflict block.
+    All other signals remain as individual slots.
+    """
+    by_ticker: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for sig in signals:
+        by_ticker[sig.get("ticker", "???")] .append(sig)
+
+    slots: list[dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]] = []
+    for _ticker, group in by_ticker.items():
+        if len(group) == 2:
+            d0 = (group[0].get("direction") or "LONG").upper()
+            d1 = (group[1].get("direction") or "LONG").upper()
+            if _are_opposing(d0, d1):
+                ordered = sorted(group, key=lambda s: float(s.get("final_score") or 0), reverse=True)
+                slots.append((ordered[0], ordered[1]))
+                continue
+        slots.extend(group)
+
+    return slots
 
 
 # ---------------------------------------------------------------------------
@@ -121,41 +270,62 @@ def render_evening(
         Always returns at least one message (always-send rule).
     """
     date_str = as_of_date.strftime("%-d %b %Y") if as_of_date else "Today"
-    header = f"📊 *Evening Summary — {date_str}*"
+    header_lines: list[str] = [f"📊 *Evening Summary — {date_str}*"]
+
+    # Market return header — use spy_return from any signal (all share the same value)
+    spy_ret: float | None = None
+    for sig in signals:
+        v = sig.get("spy_return")
+        if v is not None:
+            spy_ret = float(v)
+            break
+    if spy_ret is not None:
+        header_lines.append(f"Today Market Return: {_pct(spy_ret)}")
 
     # Split signals into ACT_NOW and WATCH tiers
     act_now_sigs = [s for s in signals if (s.get("tier") or "").upper() == "ACT_NOW"]
     watch_sigs = [s for s in signals if (s.get("tier") or "").upper() == "WATCH"]
 
-    # Build ACT NOW outcomes section
-    act_lines: list[str] = [header, "", "━━━ ACT NOW OUTCOMES ━━━"]
+    # Group opposing-direction pairs into conflict slots
+    act_slots = _group_signals(act_now_sigs)
+    watch_slots = _group_signals(watch_sigs)
 
-    act_blocks: list[str] = []
-    for sig in act_now_sigs:
-        block = _render_outcome_block(sig)
-        if block:
-            act_blocks.append(block)
+    # Build ACT NOW section
+    act_lines: list[str] = header_lines + ["", "━━━ ACT NOW ━━━"]
 
-    if act_blocks:
-        for block in act_blocks:
-            act_lines.append(block)
+    if act_slots:
+        counter = 1
+        for slot in act_slots:
+            if isinstance(slot, tuple):
+                block_lines = _render_conflict_block_evening(slot[0], slot[1])
+            else:
+                block_lines = _render_single_block(slot)
+
+            # Prepend number to first line
+            block_lines[0] = f"{counter}. {block_lines[0]}"
+            counter += 1
+
+            act_lines.extend(block_lines)
             act_lines.append("")
     else:
         act_lines.append("No outcomes to report today.")
         act_lines.append("")
 
-    # Build WATCH LIST outcomes section
-    watch_lines: list[str] = ["━━━ WATCH LIST (monitored only) ━━━"]
+    # Build WATCH LIST section
+    watch_lines: list[str] = ["━━━ WATCH LIST ━━━"]
 
-    watch_blocks: list[str] = []
-    for sig in watch_sigs:
-        block = _render_outcome_block(sig)
-        if block:
-            watch_blocks.append(block)
+    if watch_slots:
+        counter_w = len(act_slots) + 1
+        for slot in watch_slots:
+            if isinstance(slot, tuple):
+                block_lines = _render_conflict_block_evening(slot[0], slot[1])
+            else:
+                block_lines = _render_single_block(slot)
 
-    if watch_blocks:
-        for block in watch_blocks:
-            watch_lines.append(block)
+            block_lines[0] = f"{counter_w}. {block_lines[0]}"
+            counter_w += 1
+
+            watch_lines.extend(block_lines)
             watch_lines.append("")
     else:
         watch_lines.append("No watch-list outcomes today.")
@@ -166,7 +336,7 @@ def render_evening(
 
     if trading_days_scored < 20:
         scorecard_lines.append(
-            f"⚠️ Sample still building — treat as watchlist only (< 20 days)"
+            "⚠️ Sample still building — treat as watchlist only (< 20 days)"
         )
 
     if scorecard:
