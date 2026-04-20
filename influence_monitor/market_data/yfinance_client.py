@@ -166,6 +166,8 @@ class YFinanceClient(MarketDataClient):
                 "yfinance retry failed for %s (%s) — falling back to %s",
                 ticker, exc, type(fallback).__name__,
             )
+            if repo is not None:
+                repo.log_api_usage(provider="yfinance_fallback", endpoint=ticker)
             return fallback.fetch_ohlcv(ticker, target_date)
 
     def fetch_stock_vol(

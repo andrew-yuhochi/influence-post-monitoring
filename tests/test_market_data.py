@@ -163,6 +163,49 @@ class TestYFinanceRetryFallback:
 
     @patch("influence_monitor.market_data.yfinance_client.time.sleep")
     @patch("influence_monitor.market_data.yfinance_client.yf.Ticker")
+    def test_fallback_logs_api_usage(
+        self, mock_ticker_cls: MagicMock, mock_sleep: MagicMock,
+    ) -> None:
+        """When stale data triggers fallback, repo.log_api_usage is called with provider='yfinance_fallback'."""
+        mock_ticker = MagicMock()
+        mock_ticker_cls.return_value = mock_ticker
+        mock_ticker.history.return_value = _make_hist_df(_YESTERDAY)  # always stale
+
+        mock_fallback = MagicMock(spec=MarketDataClient)
+        mock_fallback.fetch_ohlcv.return_value = {
+            "open": 100.0, "high": 107.0, "low": 99.0, "close": 104.0, "volume": 500_000,
+        }
+
+        mock_repo = MagicMock()
+
+        client = YFinanceClient()
+        client.fetch_with_retry("AAPL", _TODAY, fallback=mock_fallback, repo=mock_repo)
+
+        mock_repo.log_api_usage.assert_called_once_with(
+            provider="yfinance_fallback", endpoint="AAPL"
+        )
+
+    @patch("influence_monitor.market_data.yfinance_client.time.sleep")
+    @patch("influence_monitor.market_data.yfinance_client.yf.Ticker")
+    def test_fallback_no_repo_does_not_raise(
+        self, mock_ticker_cls: MagicMock, mock_sleep: MagicMock,
+    ) -> None:
+        """When repo=None and fallback fires, no AttributeError is raised."""
+        mock_ticker = MagicMock()
+        mock_ticker_cls.return_value = mock_ticker
+        mock_ticker.history.return_value = _make_hist_df(_YESTERDAY)
+
+        mock_fallback = MagicMock(spec=MarketDataClient)
+        mock_fallback.fetch_ohlcv.return_value = {
+            "open": 100.0, "high": 107.0, "low": 99.0, "close": 104.0, "volume": 500_000,
+        }
+
+        client = YFinanceClient()
+        result = client.fetch_with_retry("AAPL", _TODAY, fallback=mock_fallback, repo=None)
+        assert result["close"] == 104.0
+
+    @patch("influence_monitor.market_data.yfinance_client.time.sleep")
+    @patch("influence_monitor.market_data.yfinance_client.yf.Ticker")
     def test_empty_then_fallback(
         self, mock_ticker_cls: MagicMock, mock_sleep: MagicMock,
     ) -> None:
@@ -358,22 +401,32 @@ class TestYFinanceFetchStockVol:
         result = client.fetch_stock_vol("AAPL", target, lookback_days=20)
 
         assert result is not None
-        assert result > 0.0
-        # Verify it is dimensionally a daily return stdev (order of magnitude check).
-        # With prices around 100-121 and increments of ~1, daily returns are ~0.5-1%.
-        assert 0.0 < result < 0.1
+        # Expected stdev computed by replicating the implementation's window selection:
+        # TradingCalendar excludes MLK Day (Jan 19) and uses Jan 20 instead.
+        # The 20-day window drawn from available mock dates yields stdev = 0.006238130914401764.
+        expected_stdev = 0.006238130914401764
+        assert abs(result - expected_stdev) < 1e-9
 
     @patch("influence_monitor.market_data.yfinance_client.yf.Ticker")
     def test_vol_respects_non_default_lookback(self, mock_ticker_cls: MagicMock) -> None:
-        """fetch_stock_vol with lookback_days=10 uses only the 10 most recent days."""
+        """fetch_stock_vol with lookback_days=10 uses only the 10 most recent days.
+
+        Price series: first 6 closes are highly volatile, last 10 are very stable.
+        This ensures lookback_days=10 (late, low-vol window) and lookback_days=15
+        (spanning into the high-vol early period) produce measurably different stdevs.
+        """
         target = date(2026, 1, 30)
         trading_days: list[date] = []
         d = date(2026, 1, 2)
-        while len(trading_days) < 15:
+        while len(trading_days) < 16:
             if d.weekday() < 5:
                 trading_days.append(d)
             d += timedelta(days=1)
-        closes = [100.0 + i * 2 for i in range(len(trading_days))]
+        # First 6: high volatility. Last 10: very stable (near-flat).
+        closes = (
+            [100.0, 115.0, 95.0, 120.0, 90.0, 110.0]
+            + [100.0, 100.2, 99.8, 100.1, 100.0, 99.9, 100.1, 100.0, 99.9, 100.1]
+        )
         hist_df = _make_vol_hist_df(trading_days, closes)
 
         mock_ticker = MagicMock()
@@ -384,13 +437,13 @@ class TestYFinanceFetchStockVol:
         result_10 = client.fetch_stock_vol("AAPL", target, lookback_days=10)
         result_15 = client.fetch_stock_vol("AAPL", target, lookback_days=15)
 
-        # Both should be floats but potentially different (window differs).
         assert result_10 is not None
         assert result_15 is not None
-        # With linearly increasing closes, stdev is ~constant per window size —
-        # we just verify both computations succeed and are positive.
         assert result_10 > 0.0
         assert result_15 > 0.0
+        # lookback=10 covers only the stable tail; lookback=15 reaches into the
+        # high-vol early period — the two stdevs must be distinctly different.
+        assert result_10 != result_15
 
     @patch("influence_monitor.market_data.yfinance_client.yf.Ticker")
     def test_vol_returns_none_on_empty_response(self, mock_ticker_cls: MagicMock) -> None:
