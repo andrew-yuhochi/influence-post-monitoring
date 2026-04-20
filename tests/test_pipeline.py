@@ -507,3 +507,151 @@ class TestAC6FactorColumnsRoundTrip:
         assert row["score_amplifier"] is None, (
             f"score_amplifier should be NULL for WATCH signal, got {row['score_amplifier']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test: morning renderer — conflict block + 5-signal cap (TASK-010c)
+# ---------------------------------------------------------------------------
+
+from influence_monitor.rendering.morning_renderer import (
+    MorningSignal,
+    Poster,
+    _are_opposing,
+    _group_act_now_signals,
+    _render_conflict_block,
+    render_morning,
+)
+
+
+def _make_signal(
+    ticker: str,
+    direction: str,
+    conviction_score: float,
+    summary: str = "Test summary.",
+    tier: str = "act_now",
+) -> MorningSignal:
+    return MorningSignal(
+        ticker=ticker,
+        posters=[Poster(handle="TestHandle", strategy="test role")],
+        direction=direction,
+        conviction_score=conviction_score,
+        summary=summary,
+        views_per_hour=1000.0,
+        corroboration_count=1,
+        direction_flip=False,
+        conflict_group="",
+        tier=tier,
+        post_created_at=datetime(2026, 4, 19, 8, 0),
+        market_cap_class="Large",
+    )
+
+
+class TestConflictBlockRenderer:
+    def test_opposing_pair_renders_as_one_conflict_block(self) -> None:
+        """Two ACT_NOW signals for the same ticker with opposing directions → one conflict block."""
+        long_sig = _make_signal("TSLA", "LONG", 8.0, "Bull case strong.")
+        short_sig = _make_signal("TSLA", "SHORT", 6.0, "Bear case strong.")
+
+        slots = _group_act_now_signals([long_sig, short_sig])
+
+        assert len(slots) == 1, f"Expected 1 slot (conflict group), got {len(slots)}"
+        assert isinstance(slots[0], tuple), "Expected a tuple (conflict pair)"
+        high, low = slots[0]
+        assert high.conviction_score >= low.conviction_score
+
+    def test_conflict_block_output_format(self) -> None:
+        """Conflict block header must use 📈📉 and no direction text."""
+        long_sig = _make_signal("TSLA", "LONG", 8.0, "Bull case.")
+        short_sig = _make_signal("TSLA", "SHORT", 6.0, "Bear case.")
+        block = _render_conflict_block(long_sig, short_sig)
+
+        assert "📈📉" in block
+        assert "$TSLA" in block
+        # Direction text should NOT appear in the header line
+        header_line = block.split("\n")[0]
+        assert "Buy" not in header_line
+        assert "Sell" not in header_line
+        assert "LONG" not in header_line
+        assert "SHORT" not in header_line
+        # Both summaries should appear in backtick formatting
+        assert "`Bull case.`" in block
+        assert "`Bear case.`" in block
+
+    def test_conflict_block_counts_as_one_slot_toward_cap(self) -> None:
+        """5 slots where one is a conflict pair → render_morning shows 5 items, not 6."""
+        # Build 4 solo signals + 1 conflict pair (TSLA LONG + TSLA SHORT) = 5 slots total
+        solo_signals = [
+            _make_signal("AAPL", "LONG", 7.0),
+            _make_signal("NFLX", "SHORT", 6.5),
+            _make_signal("GME", "LONG", 5.5),
+            _make_signal("NVDA", "LONG", 5.0),
+        ]
+        conflict_pair = [
+            _make_signal("TSLA", "LONG", 8.0, "Bull."),
+            _make_signal("TSLA", "SHORT", 7.5, "Bear."),
+        ]
+        act_now = solo_signals + conflict_pair
+
+        messages = render_morning(act_now=act_now, watch=[])
+        full_text = "\n".join(messages)
+
+        # Conflict block renders as one block — TSLA appears once via 📈📉
+        assert full_text.count("📈📉") == 1, "Expected exactly one conflict block header"
+        # The count line in the header should say 5 signals
+        assert "*5* signals need immediate action" in full_text
+
+    def test_cap_at_five_with_conflict_pair_as_one_slot(self) -> None:
+        """6 act_now inputs where one ticker is a conflict pair → only 5 slots rendered."""
+        # 5 solo + 1 conflict pair = 6 inputs → after grouping: 5 solos + 1 pair = 6 slots →
+        # after [:5] cap applied to sorted slots by conviction, highest 5 survive.
+        signals = [
+            _make_signal("TSLA", "LONG", 9.5, "Top bull."),
+            _make_signal("TSLA", "SHORT", 9.0, "Top bear."),   # conflict pair → 1 slot (9.5 key)
+            _make_signal("AAPL", "LONG", 8.0),
+            _make_signal("NFLX", "SHORT", 7.0),
+            _make_signal("GME", "LONG", 6.0),
+            _make_signal("NVDA", "LONG", 5.0),
+            _make_signal("AMZN", "LONG", 4.0),  # 7th slot — should be cut by [:5]
+        ]
+        messages = render_morning(act_now=signals, watch=[])
+        full_text = "\n".join(messages)
+
+        # Should have 5 slots shown, not 6
+        assert "*5* signals need immediate action" in full_text
+        # The lowest conviction solo (AMZN score 4.0) should be absent
+        assert "AMZN" not in full_text
+
+    def test_three_signals_same_ticker_not_grouped(self) -> None:
+        """3 signals for same ticker (2 LONG + 1 SHORT) → not grouped into conflict block."""
+        signals = [
+            _make_signal("TSLA", "LONG", 8.0, "Bull A."),
+            _make_signal("TSLA", "LONG", 7.0, "Bull B."),
+            _make_signal("TSLA", "SHORT", 6.0, "Bear C."),
+        ]
+        slots = _group_act_now_signals(signals)
+
+        # All three must remain as separate MorningSignal slots, no tuple
+        assert len(slots) == 3, f"Expected 3 separate slots, got {len(slots)}"
+        assert all(isinstance(s, MorningSignal) for s in slots), "No slot should be a tuple"
+
+    def test_same_direction_pair_not_grouped(self) -> None:
+        """Two LONG signals for same ticker → separate slots, not conflict."""
+        signals = [
+            _make_signal("AAPL", "LONG", 8.0),
+            _make_signal("AAPL", "LONG", 7.0),
+        ]
+        slots = _group_act_now_signals(signals)
+        assert len(slots) == 2
+        assert all(isinstance(s, MorningSignal) for s in slots)
+
+    def test_are_opposing_long_short(self) -> None:
+        assert _are_opposing("LONG", "SHORT") is True
+        assert _are_opposing("SHORT", "LONG") is True
+
+    def test_are_opposing_buy_sell(self) -> None:
+        assert _are_opposing("BUY", "SELL") is True
+        assert _are_opposing("SELL", "BUY") is True
+
+    def test_not_opposing_same_direction(self) -> None:
+        assert _are_opposing("LONG", "LONG") is False
+        assert _are_opposing("SHORT", "SHORT") is False

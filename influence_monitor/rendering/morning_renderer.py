@@ -119,6 +119,65 @@ def _render_signal_block(signal: MorningSignal, include_velocity: bool = False) 
     return "\n".join(lines)
 
 
+_OPPOSING = {("LONG", "SHORT"), ("SHORT", "LONG"), ("BUY", "SELL"), ("SELL", "BUY")}
+
+
+def _are_opposing(dir_a: str, dir_b: str) -> bool:
+    return (dir_a, dir_b) in _OPPOSING
+
+
+def _render_conflict_block(sig_a: MorningSignal, sig_b: MorningSignal) -> str:
+    """Render two opposing signals for the same ticker as a single conflict block.
+
+    sig_a must have conviction_score >= sig_b (higher conviction first).
+    """
+    cap_suffix = f" ({sig_a.market_cap_class})" if sig_a.market_cap_class else ""
+    lines: list[str] = []
+    lines.append(f"*📈📉 ${sig_a.ticker}{cap_suffix}*")
+
+    for sig in (sig_a, sig_b):
+        lines.append(
+            f"Score: {_conviction_display(sig.conviction_score, sig.direction)} - {round(sig.conviction_score / 10 * 100)}%"
+        )
+        for poster in sig.posters:
+            lines.append(f"@{poster.handle} - {poster.strategy}")
+
+    # Post excerpts
+    for sig in (sig_a, sig_b):
+        quote = _truncate_chars(sig.summary)
+        lines.append(f"`{quote}`")
+
+    return "\n".join(lines)
+
+
+def _group_act_now_signals(
+    signals: list[MorningSignal],
+) -> list[MorningSignal | tuple[MorningSignal, MorningSignal]]:
+    """Group ACT_NOW signals by ticker.
+
+    When exactly 2 signals share a ticker and have opposing directions, they are
+    merged into a (high, low) tuple that counts as one display slot.  All other
+    signals (solo, same-direction pairs, 3+ per ticker) remain as individual
+    MorningSignal slots.
+    """
+    from collections import defaultdict
+
+    by_ticker: dict[str, list[MorningSignal]] = defaultdict(list)
+    for sig in signals:
+        by_ticker[sig.ticker].append(sig)
+
+    slots: list[MorningSignal | tuple[MorningSignal, MorningSignal]] = []
+    for ticker, group in by_ticker.items():
+        if len(group) == 2 and _are_opposing(group[0].direction, group[1].direction):
+            # Sort so higher conviction is first
+            ordered = sorted(group, key=lambda s: s.conviction_score, reverse=True)
+            slots.append((ordered[0], ordered[1]))
+        else:
+            slots.extend(group)
+
+    return slots
+
+
 def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> list[str]:
     date_header = "📅 *Morning Alert — " + datetime.now().strftime("%-d %b %Y") + "*"
 
@@ -129,7 +188,16 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
         ]
         return ["\n".join(parts)]
 
-    top_act = sorted(act_now, key=lambda s: s.conviction_score, reverse=True)
+    # Group opposing-direction pairs for the same ticker into conflict slots, then
+    # sort slots by highest conviction score and cap at 5.
+    grouped = _group_act_now_signals(act_now)
+
+    def _slot_key(slot: MorningSignal | tuple[MorningSignal, MorningSignal]) -> float:
+        if isinstance(slot, tuple):
+            return max(s.conviction_score for s in slot)
+        return slot.conviction_score
+
+    top_act = sorted(grouped, key=_slot_key, reverse=True)[:5]
     top_watch = sorted(watch, key=lambda s: s.views_per_hour, reverse=True)[:5]
 
     # Build ACT NOW section
@@ -139,8 +207,11 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
         n = len(top_act)
         act_sections.append(f"*{n}* signal{'s' if n != 1 else ''} need immediate action")
         act_sections.append("")
-        for sig in top_act:
-            act_sections.append(_render_signal_block(sig, include_velocity=False))
+        for slot in top_act:
+            if isinstance(slot, tuple):
+                act_sections.append(_render_conflict_block(slot[0], slot[1]))
+            else:
+                act_sections.append(_render_signal_block(slot, include_velocity=False))
             act_sections.append("")
     else:
         act_sections.append("No high-conviction signals")
