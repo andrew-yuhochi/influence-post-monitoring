@@ -573,9 +573,9 @@ class TestConflictBlockRenderer:
         assert "Sell" not in header_line
         assert "LONG" not in header_line
         assert "SHORT" not in header_line
-        # Both summaries should appear in backtick formatting
-        assert "`Bull case.`" in block
-        assert "`Bear case.`" in block
+        # Both summaries should appear in blockquote formatting
+        assert '> "Bull case."' in block
+        assert '> "Bear case."' in block
 
     def test_conflict_block_counts_as_one_slot_toward_cap(self) -> None:
         """5 slots where one is a conflict pair → render_morning shows 5 items, not 6."""

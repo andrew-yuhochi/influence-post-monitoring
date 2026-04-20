@@ -145,7 +145,7 @@ def _render_conflict_block(sig_a: MorningSignal, sig_b: MorningSignal) -> str:
     # Post excerpts
     for sig in (sig_a, sig_b):
         quote = _truncate_chars(sig.summary)
-        lines.append(f"`{quote}`")
+        lines.append(f'> "{quote}"')
 
     return "\n".join(lines)
 
