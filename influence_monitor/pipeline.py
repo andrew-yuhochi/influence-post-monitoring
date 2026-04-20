@@ -1,11 +1,12 @@
-"""Pipeline orchestrator — TASK-010b (morning) + TASK-013 (evening).
+"""Pipeline orchestrator — TASK-010b (morning) + TASK-013 (evening) + TASK-014 (poll).
 
 Top-level synchronous entry point for the influence-post-monitoring pipeline.
-Wires together all Milestone 2 and 3 components.
+Wires together all Milestone 2, 3, and 4 components.
 
 CLI:
     python -m influence_monitor.pipeline morning [--dry-run] [--account-limit N] [--use-fixtures]
     python -m influence_monitor.pipeline evening [--dry-run] [--use-fixtures]
+    python -m influence_monitor.pipeline poll [--dry-run]
 
 The orchestrator is fully synchronous from the outside; async twikit calls
 are wrapped with asyncio.run() at the ingestion call-site only.
@@ -1180,6 +1181,148 @@ class PipelineOrchestrator:
             raise
 
 
+    # ------------------------------------------------------------------
+    # run_poll — TASK-014: intra-day engagement snapshot (no scoring/alerts)
+    # ------------------------------------------------------------------
+
+    def run_poll(self, dry_run: bool = False) -> None:
+        """Fetch current posts and write engagement_snapshots rows.
+
+        Does NOT re-score signals, does NOT send alerts.
+        Intended for the market_hours_poll GitHub Actions workflow which fires
+        every 2 hours during 9 AM–5 PM ET.  An ET-local-time guard exits early
+        outside that window (DST-safe, using zoneinfo).
+
+        Parameters
+        ----------
+        dry_run:
+            Log what would be written; do not touch the DB or send anything.
+        """
+        from zoneinfo import ZoneInfo
+
+        et_tz = ZoneInfo("America/New_York")
+        now_et = datetime.now(tz=et_tz)
+        et_hour = now_et.hour  # 0-23 in ET local time
+
+        if et_hour < 9 or et_hour >= 17:
+            logger.info(
+                "run_poll: ET local time is %02d:%02d — outside 09:00–17:00 ET window; exiting early",
+                et_hour, now_et.minute,
+            )
+            return
+
+        run_date = now_et.date()
+        start_ts = monotonic()
+        logger.info(
+            "run_poll START — ET time=%02d:%02d run_date=%s dry_run=%s",
+            et_hour, now_et.minute, run_date, dry_run,
+        )
+
+        try:
+            # Ensure schema + seed exist
+            if not dry_run:
+                self._repo.init_schema()
+                self._repo.seed(phone_e164=self._settings.recipient_phone_e164)
+
+            # Validate + load active accounts
+            try:
+                active_accounts = asyncio.run(self._account_registry.validate_and_promote())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("validate_and_promote raised: %s — using get_active_accounts()", exc)
+                active_accounts = self._account_registry.get_active_accounts()
+
+            if not active_accounts:
+                logger.warning("run_poll: no active accounts — nothing to poll")
+                return
+
+            logger.info("run_poll: %d active accounts", len(active_accounts))
+
+            # Determine collection window: last 2h (matches poll cadence)
+            from datetime import timedelta
+            window_start = datetime.now(tz=et_tz) - timedelta(hours=2)
+
+            # Fetch posts
+            try:
+                all_posts, success_count, failure_count = asyncio.run(
+                    self._account_registry.fetch_all_accounts(
+                        since=window_start,
+                        max_count=self._settings.max_posts_per_account,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("run_poll: fetch_all_accounts raised: %s", exc)
+                all_posts = []
+                success_count = 0
+                failure_count = 0
+
+            logger.info(
+                "run_poll: %d posts fetched from %d/%d accounts (%d failed)",
+                len(all_posts), success_count, len(active_accounts), failure_count,
+            )
+
+            if not all_posts:
+                logger.info("run_poll: no posts in window — nothing to snapshot")
+                return
+
+            if dry_run:
+                logger.info(
+                    "[DRY-RUN] Would write %d engagement_snapshots rows", len(all_posts)
+                )
+                return
+
+            # Look up DB post_id for each fetched post; insert snapshot row
+            snaps_written = 0
+            accounts_by_handle_lower = {
+                acc["handle"].lower(): acc for acc in active_accounts
+            }
+
+            for post in all_posts:
+                acc = accounts_by_handle_lower.get(post.author_handle.lower(), {})
+                account_id = acc.get("id", 1)
+
+                # Upsert the post row (insert if not already present from morning run)
+                existing_rows = self._repo._execute(
+                    "SELECT id FROM posts WHERE source_type = ? AND external_id = ?",
+                    [post.source_type, post.external_id],
+                )
+                if existing_rows:
+                    db_post_id = existing_rows[0]["id"]
+                else:
+                    db_post_id = self._repo.insert_post(
+                        tenant_id=1,
+                        account_id=account_id,
+                        external_id=post.external_id,
+                        source_type=post.source_type,
+                        text=post.text,
+                        posted_at=post.posted_at,
+                        fetched_at=datetime.now(tz=timezone.utc),
+                        view_count=post.view_count,
+                        repost_count=post.repost_count,
+                    )
+
+                if db_post_id is None:
+                    logger.warning("run_poll: could not get post_id for %s", post.external_id)
+                    continue
+
+                snap_id = self._repo.insert_engagement_snapshot(
+                    post_id=db_post_id,
+                    view_count=post.view_count,
+                    repost_count=post.repost_count,
+                )
+                if snap_id is not None:
+                    snaps_written += 1
+
+            duration = monotonic() - start_ts
+            logger.info(
+                "run_poll DONE — %d snapshots written in %.1fs",
+                snaps_written, duration,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("run_poll unhandled exception: %s", exc)
+            raise
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -1243,6 +1386,23 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ------------------------------------------------------------------
+    # poll subcommand — TASK-014: intra-day engagement snapshot
+    # ------------------------------------------------------------------
+    poll_parser = subparsers.add_parser(
+        "poll",
+        help=(
+            "Fetch current posts and write engagement_snapshots rows. "
+            "Does NOT re-score or send alerts. "
+            "Includes an ET-local-time guard: exits 0 outside 09:00–17:00 ET."
+        ),
+    )
+    poll_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Log what would be written; do not touch the DB",
+    )
+
     return parser
 
 
@@ -1258,6 +1418,19 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = Settings()
+
+    # Bootstrap cookies from TWITTER_COOKIES_JSON env var when present.
+    # This supports GitHub Actions Strategy A (cookie secret) so the ephemeral
+    # runner has valid session cookies before twikit initialises.
+    if settings.twitter_cookies_json:
+        cookies_path = Path(settings.cookies_path)
+        cookies_path.parent.mkdir(parents=True, exist_ok=True)
+        cookies_path.write_text(settings.twitter_cookies_json)
+        logger.info(
+            "Wrote TWITTER_COOKIES_JSON to %s (%d bytes)",
+            cookies_path, len(settings.twitter_cookies_json),
+        )
+
     repo = SignalRepository(settings)
 
     # Ensure schema + seed data exist before any run
@@ -1283,6 +1456,8 @@ def main() -> None:
                 dry_run=args.dry_run,
                 use_fixtures=args.use_fixtures,
             )
+        elif args.command == "poll":
+            orchestrator.run_poll(dry_run=args.dry_run)
         else:
             logger.error("Unknown command: %s", args.command)
             sys.exit(1)

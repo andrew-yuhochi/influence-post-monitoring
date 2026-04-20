@@ -1,0 +1,47 @@
+name: Morning Alert
+
+"on":
+  schedule:
+    # 9:00 AM ET: 13:00 UTC in summer (EDT UTC-4), 14:00 UTC in winter (EST UTC-5)
+    # Run at 13:00 UTC — fires at 9 AM EDT or 8 AM EST; pipeline checks ET local
+    # time and exits early if outside the 09:00–09:30 ET window.
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Run morning alert pipeline
+        env:
+          TWIKIT_USERNAME: ${{ secrets.TWIKIT_USERNAME }}
+          TWIKIT_EMAIL: ${{ secrets.TWIKIT_EMAIL }}
+          TWIKIT_PASSWORD: ${{ secrets.TWIKIT_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_SANDBOX_NUMBER: ${{ secrets.TWILIO_SANDBOX_NUMBER }}
+          CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
+          RECIPIENT_PHONE_E164: ${{ secrets.RECIPIENT_PHONE_E164 }}
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          TWITTER_COOKIES_JSON: ${{ secrets.TWITTER_COOKIES_JSON }}
+        run: python -m influence_monitor.pipeline morning

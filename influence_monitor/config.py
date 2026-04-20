@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     twitter_username: str = ""
     twitter_email: str = ""
     twitter_password: str = ""
+    # Optional: full cookies JSON string (GitHub Actions secret TWITTER_COOKIES_JSON).
+    # When set, the pipeline writes this to cookies_path before twikit initialises,
+    # providing cookie persistence without committing the file to the repo.
+    twitter_cookies_json: str = ""
 
     # WhatsApp — Twilio (primary delivery)
     twilio_account_sid: str = ""

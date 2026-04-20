@@ -1,0 +1,48 @@
+name: Market Hours Poll
+
+"on":
+  schedule:
+    # Fire every 2 hours from 13:00–21:00 UTC Mon–Fri.
+    # This covers 9 AM–5 PM ET in both summer (EDT UTC-4) and winter (EST UTC-5).
+    # The pipeline's poll subcommand checks ET local time internally and exits 0
+    # if the current hour is before 9 AM or at/after 5 PM ET (DST-aware early-exit).
+    - cron: '0 13,15,17,19,21 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Run market-hours engagement poll
+        env:
+          TWIKIT_USERNAME: ${{ secrets.TWIKIT_USERNAME }}
+          TWIKIT_EMAIL: ${{ secrets.TWIKIT_EMAIL }}
+          TWIKIT_PASSWORD: ${{ secrets.TWIKIT_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_SANDBOX_NUMBER: ${{ secrets.TWILIO_SANDBOX_NUMBER }}
+          CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
+          RECIPIENT_PHONE_E164: ${{ secrets.RECIPIENT_PHONE_E164 }}
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          TWITTER_COOKIES_JSON: ${{ secrets.TWITTER_COOKIES_JSON }}
+        run: python -m influence_monitor.pipeline poll

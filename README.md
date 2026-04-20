@@ -140,10 +140,66 @@ python -m influence_monitor.pipeline morning
 # Evening summary — run after 4:30 PM ET
 python -m influence_monitor.pipeline evening
 
+# Intra-day engagement poll — fetches current posts and writes engagement_snapshots rows;
+# no re-scoring, no alerts sent.  ET-local-time guard: exits 0 outside 09:00–17:00 ET.
+python -m influence_monitor.pipeline poll
+
 # Dry run (renders to stdout, no DB writes, no WhatsApp sent)
 python -m influence_monitor.pipeline morning --dry-run
 python -m influence_monitor.pipeline evening --dry-run
+python -m influence_monitor.pipeline poll --dry-run
 ```
+
+---
+
+## GitHub Actions scheduling
+
+Three workflows run automatically on a Mon–Fri schedule. All require the secrets below to be registered in the repository Settings → Secrets and variables → Actions.
+
+| Workflow file | Schedule (UTC) | Purpose |
+|---|---|---|
+| `morning_alert.yml` | `0 13 * * 1-5` | Morning alert — 9 AM ET |
+| `evening_summary.yml` | `45 20 * * 1-5` | Evening summary — 4:45 PM ET |
+| `market_hours_poll.yml` | `0 13,15,17,19,21 * * 1-5` | Engagement snapshot every 2h during market hours |
+
+All three workflows support `workflow_dispatch` for manual one-off runs.
+
+### Required GitHub Actions secrets
+
+| Secret | Description |
+|---|---|
+| `TWIKIT_USERNAME` | X/Twitter login username for twikit |
+| `TWIKIT_EMAIL` | X/Twitter login email |
+| `TWIKIT_PASSWORD` | X/Twitter login password |
+| `ANTHROPIC_API_KEY` | Claude API key for LLM scoring |
+| `TWILIO_ACCOUNT_SID` | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token |
+| `TWILIO_SANDBOX_NUMBER` | WhatsApp sandbox sender (`whatsapp:+14155238886`) |
+| `CALLMEBOT_API_KEY` | CallMeBot API key (WhatsApp fallback) |
+| `RECIPIENT_PHONE_E164` | Your WhatsApp number in E.164 format |
+| `TURSO_URL` | Turso database URL (`libsql://...`) |
+| `TURSO_TOKEN` | Turso auth token |
+| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage API key (market data fallback) |
+| `TWITTER_COOKIES_JSON` | (Optional) twikit cookie JSON — see below |
+
+### Twikit cookie persistence strategy
+
+twikit authenticates via browser cookies stored in `data/twitter_cookies.json`. GitHub Actions runners are ephemeral — this file is destroyed after each run. Two strategies are supported:
+
+**Strategy A — Commit cookies as a multi-line secret (recommended for PoC):**
+
+1. Run `python -m influence_monitor.pipeline auth` locally to generate `data/twitter_cookies.json`.
+2. Copy the full JSON content.
+3. Add it as a GitHub Actions secret named `TWITTER_COOKIES_JSON` (multi-line secrets are supported).
+4. The pipeline reads `TWITTER_COOKIES_JSON` from the environment at startup and writes it to `data/twitter_cookies.json` before twikit initialises.
+
+**Strategy B — One-time `workflow_dispatch` auth run:**
+
+1. Trigger a manual run of any workflow with the `--auth-only` flag (not yet implemented — backlog item).
+2. The auth run logs in with username/password, writes cookies, and uploads them as an artifact.
+3. Subsequent runs download the artifact. Not implemented at PoC — use Strategy A.
+
+The pipeline's `Settings` class reads `TWITTER_COOKIES_JSON` from the environment and writes it to `COOKIES_PATH` before twikit is initialised. If the env var is unset, the pipeline falls back to username/password login using `TWIKIT_USERNAME` / `TWIKIT_EMAIL` / `TWIKIT_PASSWORD`.
 
 ---
 
@@ -190,7 +246,7 @@ All weights and thresholds live in the `scoring_config` DB table — tune withou
 
 **twikit ToS**: cookie-based scraping violates X's Terms of Service. Built for personal PoC use only. MVP uses the official tweepy API.
 
-**EST/EDT DST handling**: GitHub Actions cron runs in UTC. On two DST-transition days per year, the scheduled fire time drifts 1 hour in ET. The pipeline's internal ET-local-time check catches this and no-ops or sends at a slightly shifted time. Acceptable for PoC.
+**EST/EDT DST handling**: GitHub Actions cron runs in UTC. On the two DST-transition Sundays each year (March spring-forward, November fall-back), the UTC cron fire times drift ±1 hour relative to ET. For `morning_alert.yml` and `evening_summary.yml` this means the alert fires 1 hour early or late on those days — acceptable for PoC. For `market_hours_poll.yml` the pipeline's `poll` subcommand contains a DST-safe ET-local-time guard (using `zoneinfo.ZoneInfo("America/New_York")`) that exits 0 if the current ET hour is outside the 09:00–17:00 window, so on transition days the out-of-window cron fire is silently skipped rather than polluting the DB with off-hours snapshots.
 
 **yfinance staleness**: freshness assertions on every fetch; Alpha Vantage is the fallback. Stale data from both sources marks the signal `price_data_source = 'unavailable'`.
 

@@ -1,0 +1,27 @@
+Screenshot pending — user action required.
+
+To complete the TASK-014 Demo Artifact:
+
+1. Ensure all GitHub Actions secrets are registered in the repository:
+   Settings → Secrets and variables → Actions → New repository secret
+   Required: TWIKIT_USERNAME, TWIKIT_EMAIL, TWIKIT_PASSWORD, ANTHROPIC_API_KEY,
+   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_SANDBOX_NUMBER, CALLMEBOT_API_KEY,
+   RECIPIENT_PHONE_E164, TURSO_URL, TURSO_TOKEN, ALPHA_VANTAGE_API_KEY
+   Optional: TWITTER_COOKIES_JSON (multi-line JSON from data/twitter_cookies.json)
+
+2. Go to the repository Actions tab on GitHub.
+
+3. Trigger each of the three workflows manually via "Run workflow" (workflow_dispatch):
+   - "Morning Alert"       (.github/workflows/morning_alert.yml)
+   - "Evening Summary"     (.github/workflows/evening_summary.yml)
+   - "Market Hours Poll"   (.github/workflows/market_hours_poll.yml)
+
+4. Confirm each run completes successfully (green checkmark).
+   Note: market_hours_poll may exit 0 quickly if triggered outside 09:00-17:00 ET —
+   that is correct behavior (ET-local-time guard).
+
+5. Take a screenshot of the Actions tab showing all three successful runs.
+
+6. Save the screenshot as TASK-014-actions.png in this directory.
+
+Once the screenshot is saved, update TASK-014 Status to Done in TASKS.md.
