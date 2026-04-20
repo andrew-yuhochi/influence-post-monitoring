@@ -1055,20 +1055,25 @@ class PipelineOrchestrator:
 
         try:
             # ------------------------------------------------------------------
-            # STEP 1 — Check trading day
-            # ------------------------------------------------------------------
-            if not self._calendar.is_trading_day(run_date):
-                logger.info(
-                    "run_evening: %s is not a trading day — skipping", run_date
-                )
-                return
-
-            # ------------------------------------------------------------------
-            # STEP 2 — Fixtures or real OutcomeEngine
+            # STEP 0 — Fixtures short-circuit (bypasses trading-day gate)
             # ------------------------------------------------------------------
             if use_fixtures:
                 self._run_evening_fixtures_mode(run_date, dry_run=dry_run)
+                # Skip the trading-day check and OutcomeEngine; continue from
+                # STEP 3 onward so rendering + delivery still happen.
             else:
+                # ------------------------------------------------------------------
+                # STEP 1 — Check trading day
+                # ------------------------------------------------------------------
+                if not self._calendar.is_trading_day(run_date):
+                    logger.info(
+                        "run_evening: %s is not a trading day — skipping", run_date
+                    )
+                    return
+
+                # ------------------------------------------------------------------
+                # STEP 2 — Real OutcomeEngine
+                # ------------------------------------------------------------------
                 logger.info("STEP 2 START — OutcomeEngine.compute_and_store")
                 self._outcome_engine.compute_and_store(run_date)
                 logger.info("STEP 2 DONE — outcome computation complete")

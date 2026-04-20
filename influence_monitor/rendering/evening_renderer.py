@@ -176,7 +176,7 @@ def render_evening(
             n = int(row.get("n_signals", 0))
             sign = "+" if avg_ev >= 0 else ""
             scorecard_lines.append(
-                f"@{handle} — avg excess-vol {sign}{avg_ev:.2f} ({n} signals)"
+                f"@{handle} — avg excess-vol {sign}{avg_ev:.2f} ({n} {'signal' if n == 1 else 'signals'})"
             )
     else:
         scorecard_lines.append("No scorecard data yet.")
