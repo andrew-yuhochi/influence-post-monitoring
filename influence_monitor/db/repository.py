@@ -171,7 +171,15 @@ class _LibsqlBackend:
 
     def executescript(self, script: str) -> None:
         """Execute a multi-statement SQL script (split on ';')."""
-        statements = [s.strip() for s in script.split(";") if s.strip()]
+
+        def _has_sql(stmt: str) -> bool:
+            return any(
+                line.strip() and not line.strip().startswith("--")
+                for line in stmt.splitlines()
+            )
+
+        statements = [s.strip() for s in script.split(";")]
+        statements = [s for s in statements if _has_sql(s)]
         if not statements:
             return
         requests: list[dict[str, Any]] = [
