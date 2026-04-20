@@ -53,6 +53,11 @@ class _LibsqlBackend:
     def __init__(self, url: str, auth_token: str | None) -> None:
         import libsql_client  # type: ignore[import]
 
+        # Turso's newer infrastructure (2024+) dropped WebSocket (wss://) support.
+        # libsql_client converts libsql:// to wss://, so normalise to https:// first.
+        if url.startswith("libsql://"):
+            url = url.replace("libsql://", "https://", 1)
+
         kwargs: dict[str, Any] = {"url": url}
         if auth_token:
             kwargs["auth_token"] = auth_token
