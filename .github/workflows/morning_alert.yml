@@ -37,7 +37,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_SANDBOX_NUMBER: ${{ secrets.TWILIO_SANDBOX_NUMBER }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
           CALLMEBOT_API_KEY: ${{ secrets.CALLMEBOT_API_KEY }}
           RECIPIENT_PHONE_E164: ${{ secrets.RECIPIENT_PHONE_E164 }}
           TURSO_URL: ${{ secrets.TURSO_URL }}

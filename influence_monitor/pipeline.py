@@ -1219,11 +1219,6 @@ class PipelineOrchestrator:
         )
 
         try:
-            # Ensure schema + seed exist
-            if not dry_run:
-                self._repo.init_schema()
-                self._repo.seed(phone_e164=self._settings.recipient_phone_e164)
-
             # Validate + load active accounts
             try:
                 active_accounts = asyncio.run(self._account_registry.validate_and_promote())
