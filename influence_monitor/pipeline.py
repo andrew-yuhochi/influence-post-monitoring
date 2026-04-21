@@ -702,12 +702,33 @@ class PipelineOrchestrator:
             logger.info("STEP 7 DONE — conflict resolution applied")
 
             # ------------------------------------------------------------------
-            # STEP 8 — Classify into ACT_NOW / WATCH / UNSCORED
+            # STEP 8 — Rank-first tier split: top-5 by score → ACT_NOW;
+            #           remaining velocity-eligible signals → WATCH candidates
             # ------------------------------------------------------------------
-            logger.info("STEP 8 START — tier classification (embedded in ScoringEngine)")
-            # Tier is set in ScoringEngine.score(); no separate step needed here.
-            act_now_signals_raw = [s for s in scored_signals if s.tier == "ACT_NOW"]
-            watch_signals_raw = [s for s in scored_signals if s.tier == "WATCH"]
+            logger.info("STEP 8 START — rank-first tier split")
+            # Sort all scored signals (excluding UNSCORED gate failures) by
+            # final_score descending.  Only signals that passed the conviction/
+            # direction gate have a non-zero final_score; UNSCORED signals have
+            # final_score == 0.0 and tier == "UNSCORED" — exclude them here.
+            qualifying = [s for s in scored_signals if s.tier != "UNSCORED"]
+            all_sorted = sorted(qualifying, key=lambda s: s.final_score, reverse=True)
+
+            # Top 5 unconditionally → ACT_NOW (mutate tier in place; ScoredSignal
+            # is a plain dataclass, not frozen, so direct assignment is safe).
+            act_now_signals_raw = all_sorted[:5]
+            for s in act_now_signals_raw:
+                s.tier = "ACT_NOW"
+
+            # Remaining velocity-eligible signals → WATCH candidates
+            remaining = all_sorted[5:]
+            watch_signals_raw = sorted(
+                [s for s in remaining if s.tier == "WATCH"],
+                key=lambda s: s.final_score,
+                reverse=True,
+            )[:5]
+            for s in watch_signals_raw:
+                s.tier = "WATCH"  # already WATCH but be explicit
+
             logger.info(
                 "STEP 8 DONE — ACT_NOW=%d WATCH=%d UNSCORED=%d",
                 len(act_now_signals_raw),

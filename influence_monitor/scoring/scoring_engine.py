@@ -154,7 +154,13 @@ def _compute_views_per_hour(views: int | None, posted_at: datetime, collection_w
 # ---------------------------------------------------------------------------
 
 class SignalClassifier:
-    """Assigns ACT_NOW / WATCH / UNSCORED tier based on virality thresholds."""
+    """Assigns WATCH / UNSCORED tier based on velocity threshold.
+
+    ACT_NOW is no longer assigned here — the pipeline assigns it after
+    rank-first sorting (top-5 by final_score unconditionally).
+    _views_threshold and _reposts_threshold are retained because the
+    ScoringEngine still uses them as F2a normalisation denominators.
+    """
 
     def __init__(self, config: dict[str, float]) -> None:
         self._views_threshold = config.get("virality_views_threshold", 50_000)
@@ -170,17 +176,17 @@ class SignalClassifier:
         direction: str,
         conviction_level: int,
     ) -> Tier:
-        """Classify a single signal.
+        """Classify a single signal as WATCH or UNSCORED.
 
         UNSCORED gate fires first (low conviction / ambiguous direction).
-        ACT_NOW: views >= threshold OR reposts >= threshold.
-        WATCH: below threshold but views_per_hour >= vel_floor.
+        WATCH: views_per_hour >= vel_floor (velocity-eligible for Watch list).
         UNSCORED: everything else.
+
+        ACT_NOW is assigned downstream by the pipeline after sorting all
+        scored signals by final_score and taking the top 5.
         """
         if conviction_level < 2 or direction in ("NEUTRAL", "AMBIGUOUS"):
             return "UNSCORED"
-        if (views or 0) >= self._views_threshold or (reposts or 0) >= self._reposts_threshold:
-            return "ACT_NOW"
         if views_per_hour is not None and views_per_hour >= self._vel_floor:
             return "WATCH"
         return "UNSCORED"
