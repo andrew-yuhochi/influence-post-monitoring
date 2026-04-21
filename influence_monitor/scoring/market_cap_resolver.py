@@ -151,7 +151,7 @@ class MarketCapResolver:
             from finvizfinance.quote import finvizfinance  # type: ignore[import]
 
             stock = finvizfinance(ticker_upper)
-            fundamentals: dict = stock.TickerFundamentals()
+            fundamentals: dict = stock.ticker_fundament()
             raw_cap: str = fundamentals.get("Market Cap", "")
             sector: str | None = fundamentals.get("Sector") or None
             industry: str | None = fundamentals.get("Industry") or None

@@ -21,6 +21,9 @@ class TwilioWhatsAppDelivery(MessageDelivery):
         self._to = settings.recipient_phone_e164
 
     def send(self, text: str) -> bool:
+        if not text or not text.strip():
+            logger.warning("Skipping empty message body")
+            return True
         try:
             client = Client(self._sid, self._token)
             message = client.messages.create(
@@ -32,12 +35,12 @@ class TwilioWhatsAppDelivery(MessageDelivery):
             return True
         except TwilioRestException as exc:
             logger.error(
-                "Twilio API error",
-                extra={"status": exc.status, "code": exc.code, "detail": exc.msg},
+                "Twilio API error: status=%s code=%s detail=%s body_len=%d",
+                exc.status, exc.code, exc.msg, len(text),
             )
             return False
         except Exception as exc:
-            logger.error("Twilio unexpected error", extra={"error": str(exc)})
+            logger.error("Twilio unexpected error: %s body_len=%d", exc, len(text))
             return False
 
 

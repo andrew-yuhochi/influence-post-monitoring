@@ -13,6 +13,7 @@ Formula (TDD §2.3):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -90,7 +91,7 @@ class AmplifierFetcher:
             return 0.0
 
         try:
-            retweeters = source.fetch_retweeters(post.external_id, max_count=100)
+            retweeters = asyncio.run(source.fetch_retweeters(post.external_id, max_count=100))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "fetch_retweeters failed for post_id=%s: %s — returning amplifier=0.0",

@@ -26,6 +26,7 @@ Consecutive-failure debounce (TDD §2.1):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -274,6 +275,8 @@ class AccountRegistry:
         since: datetime,
         max_count: int = 20,
         max_pages: int = 1,
+        inter_account_delay: float = 0.0,
+        rate_limit_retry_delay: float = 0.0,
     ) -> tuple[list[RawPost], int, int]:
         """Fetch posts for all active primary accounts with repo-backed failure tracking.
 
@@ -296,7 +299,7 @@ class AccountRegistry:
         success_count = 0
         failure_count = 0
 
-        for handle in handles:
+        for account_idx, handle in enumerate(handles, start=1):
             account = handle_to_account[handle]
             account_id = account["id"]
             try:
@@ -343,11 +346,172 @@ class AccountRegistry:
                     )
 
             except Exception as exc:
-                logger.warning(
-                    "Failed to fetch @%s: %s: %s", handle, type(exc).__name__, exc,
+                exc_str = f"{type(exc).__name__}: {exc}"
+                is_event_loop_closed = "Event loop is closed" in exc_str
+                is_rate_limit = (
+                    "429" in exc_str
+                    or "TooManyRequests" in exc_str
+                    or "Rate limit" in str(exc)
                 )
-                failure_count += 1
-                self.record_fetch_failure(account_id)
+
+                # twikit's httpx.AsyncClient gets tied to the event loop that was
+                # active during validate_and_promote().  The first fetch in a new
+                # asyncio.run() call therefore fails — but retrying immediately works
+                # because twikit re-initialises its session on the new loop.
+                if is_event_loop_closed:
+                    logger.warning(
+                        "Event loop closed for @%s — retrying immediately (twikit re-init)",
+                        handle,
+                    )
+                    try:
+                        posts = await self._source.fetch_recent_posts(
+                            handle, since, max_count, max_pages
+                        )
+                        all_posts.extend(posts)
+                        success_count += 1
+                        self.record_fetch_success(account_id)
+                        for post in posts:
+                            post_id = self._repo.insert_post(
+                                tenant_id=self._tenant_id,
+                                account_id=account_id,
+                                external_id=post.external_id,
+                                source_type=post.source_type,
+                                text=post.text,
+                                posted_at=post.posted_at,
+                                fetched_at=post.fetched_at,
+                                view_count=post.view_count,
+                                repost_count=post.repost_count,
+                                reply_count=post.reply_count,
+                                like_count=post.like_count,
+                                bookmark_count=post.bookmark_count,
+                                raw_payload=post.raw_payload if post.raw_payload else None,
+                            )
+                            if post_id is not None:
+                                self._repo.insert_engagement_snapshot(
+                                    post_id=post_id,
+                                    view_count=post.view_count,
+                                    repost_count=post.repost_count,
+                                    reply_count=post.reply_count,
+                                    like_count=post.like_count,
+                                )
+                        if posts and posts[0].follower_count_at_post is not None:
+                            self._repo.upsert_account(
+                                tenant_id=self._tenant_id,
+                                handle=handle,
+                                follower_count_at_post=posts[0].follower_count_at_post,
+                            )
+                        if inter_account_delay > 0:
+                            await asyncio.sleep(inter_account_delay)
+                        continue
+                    except Exception as reinit_exc:
+                        logger.warning(
+                            "Retry after event loop closed failed for @%s: %s",
+                            handle, reinit_exc,
+                        )
+                        failure_count += 1
+                        try:
+                            self.record_fetch_failure(account_id)
+                        except Exception:
+                            pass
+                    if inter_account_delay > 0:
+                        await asyncio.sleep(inter_account_delay)
+                    continue
+
+                if is_rate_limit and rate_limit_retry_delay > 0:
+                    retried = False
+                    for retry_num, wait_secs in enumerate(
+                        [rate_limit_retry_delay, rate_limit_retry_delay * 2], start=1
+                    ):
+                        logger.warning(
+                            "Rate limited on @%s — waiting %.0fs (retry %d/2, account %d/%d)",
+                            handle, wait_secs, retry_num, account_idx, len(handles),
+                        )
+                        await asyncio.sleep(wait_secs)
+                        try:
+                            posts = await self._source.fetch_recent_posts(
+                                handle, since, max_count, max_pages
+                            )
+                            all_posts.extend(posts)
+                            success_count += 1
+                            self.record_fetch_success(account_id)
+
+                            for post in posts:
+                                post_id = self._repo.insert_post(
+                                    tenant_id=self._tenant_id,
+                                    account_id=account_id,
+                                    external_id=post.external_id,
+                                    source_type=post.source_type,
+                                    text=post.text,
+                                    posted_at=post.posted_at,
+                                    fetched_at=post.fetched_at,
+                                    view_count=post.view_count,
+                                    repost_count=post.repost_count,
+                                    reply_count=post.reply_count,
+                                    like_count=post.like_count,
+                                    bookmark_count=post.bookmark_count,
+                                    raw_payload=post.raw_payload if post.raw_payload else None,
+                                )
+                                if post_id is not None:
+                                    self._repo.insert_engagement_snapshot(
+                                        post_id=post_id,
+                                        view_count=post.view_count,
+                                        repost_count=post.repost_count,
+                                        reply_count=post.reply_count,
+                                        like_count=post.like_count,
+                                    )
+
+                            if posts and posts[0].follower_count_at_post is not None:
+                                self._repo.upsert_account(
+                                    tenant_id=self._tenant_id,
+                                    handle=handle,
+                                    follower_count_at_post=posts[0].follower_count_at_post,
+                                )
+
+                            retried = True
+                            break  # retry succeeded
+
+                        except Exception as retry_exc:
+                            exc_str = str(retry_exc)
+                            is_still_rate_limit = (
+                                "429" in exc_str
+                                or "TooManyRequests" in exc_str
+                                or "Rate limit" in exc_str
+                            )
+                            if not is_still_rate_limit:
+                                logger.warning(
+                                    "Retry %d for @%s failed (non-429): %s",
+                                    retry_num, handle, retry_exc,
+                                )
+                                break
+                            logger.warning(
+                                "Retry %d for @%s still rate-limited",
+                                retry_num, handle,
+                            )
+
+                    if retried:
+                        # Success path: apply inter-account delay and continue
+                        if inter_account_delay > 0:
+                            await asyncio.sleep(inter_account_delay)
+                        continue
+
+                    # All retries exhausted
+                    failure_count += 1
+                    try:
+                        self.record_fetch_failure(account_id)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(
+                        "Failed to fetch @%s: %s: %s", handle, type(exc).__name__, exc,
+                    )
+                    failure_count += 1
+                    try:
+                        self.record_fetch_failure(account_id)
+                    except Exception:
+                        pass
+
+            if inter_account_delay > 0:
+                await asyncio.sleep(inter_account_delay)
 
         logger.info(
             "Ingestion complete: %d posts from %d/%d accounts (%d failed)",

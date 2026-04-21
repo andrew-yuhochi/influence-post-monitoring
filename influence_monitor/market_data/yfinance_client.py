@@ -13,6 +13,7 @@ configurable lookback window) and fetch_spy_return (SPY day-over-day return).
 
 from __future__ import annotations
 
+import concurrent.futures as _futures
 import logging
 import statistics
 import time
@@ -30,6 +31,24 @@ from influence_monitor.market_data.trading_calendar import TradingCalendar
 logger = logging.getLogger(__name__)
 
 _RETRY_DELAY_SECONDS = 60
+_YFINANCE_TIMEOUT_SECS = 30
+
+
+def _yf_history(ticker_obj, **kwargs):
+    """Run yf.Ticker.history() with a hard wall-clock timeout.
+
+    yfinance has internal retry with exponential backoff that can hang
+    for 40+ minutes on rate-limited connections.  This wrapper enforces
+    a hard limit so the caller fails fast.
+    """
+    with _futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(ticker_obj.history, **kwargs)
+        try:
+            return future.result(timeout=_YFINANCE_TIMEOUT_SECS)
+        except _futures.TimeoutError:
+            raise TimeoutError(
+                f"yfinance history() call timed out after {_YFINANCE_TIMEOUT_SECS}s"
+            )
 _SPY_TICKER = "SPY"
 
 # Module-level TradingCalendar instance (shared across calls, one-time load cost).
@@ -60,7 +79,7 @@ class YFinanceClient(MarketDataClient):
             DataUnavailableError: Empty response from yfinance.
             DataFreshnessError: Data date does not match target_date.
         """
-        hist = yf.Ticker(ticker).history(period="5d")
+        hist = _yf_history(yf.Ticker(ticker), period="5d")
 
         if hist is None or hist.empty:
             raise DataUnavailableError(
@@ -199,7 +218,8 @@ class YFinanceClient(MarketDataClient):
         fetch_start = target_date - timedelta(days=buffer_days)
 
         try:
-            hist = yf.Ticker(ticker).history(
+            hist = _yf_history(
+                yf.Ticker(ticker),
                 start=fetch_start.isoformat(),
                 end=(target_date + timedelta(days=1)).isoformat(),  # end is exclusive
             )
@@ -292,7 +312,8 @@ class YFinanceClient(MarketDataClient):
         # Fetch 10 calendar days to cover weekends + a holiday or two.
         fetch_start = prev_day - timedelta(days=5)
         try:
-            hist = yf.Ticker(_SPY_TICKER).history(
+            hist = _yf_history(
+                yf.Ticker(_SPY_TICKER),
                 start=fetch_start.isoformat(),
                 end=(target_date + timedelta(days=1)).isoformat(),
             )

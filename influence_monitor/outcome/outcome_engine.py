@@ -15,6 +15,7 @@ On any price fetch failure: price_data_source='unavailable', outcome columns NUL
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -88,6 +89,8 @@ class OutcomeEngine:
                     sig["id"],
                 )
                 continue
+            if processed > 0:
+                time.sleep(1)
             self._process_signal(sig, target_date, prev_trading_day, vol_lookback_days)
             processed += 1
 
@@ -115,27 +118,65 @@ class OutcomeEngine:
         ticker: str = sig["ticker"]
         direction: str = (sig.get("direction") or "LONG").upper()
 
-        try:
-            ohlcv = self._market.fetch_ohlcv(ticker, target_date)
-            today_open: float = ohlcv["open"]   # type: ignore[assignment]
-            today_close: float = ohlcv["close"]  # type: ignore[assignment]
+        # One attempt; retry once (30s backoff) only for transient non-rate-limit errors.
+        # Yahoo Finance rate limits are typically 15-minute windows — retrying after
+        # 30s or 90s rarely helps and only stalls the evening pipeline.  Mark as
+        # unavailable immediately on rate-limit errors; retry once for transient failures.
+        _fetch_ok = False
+        today_open: float = 0.0
+        today_close: float = 0.0
+        prev_close: float = 0.0
+        spy_return: float | None = None
+        stock_20d_vol: float | None = None
+        last_exc: Exception | None = None
 
-            prev_close: float = self._market.fetch_close(ticker, prev_trading_day)
+        for attempt in range(2):  # attempt 0 = first try, attempt 1 = single retry
+            if attempt > 0:
+                time.sleep(30)
+            try:
+                ohlcv = self._market.fetch_ohlcv(ticker, target_date)
+                today_open = ohlcv["open"]   # type: ignore[assignment]
+                today_close = ohlcv["close"]  # type: ignore[assignment]
 
-            spy_return = self._market.fetch_spy_return(target_date)
-            if spy_return is None:
-                raise ValueError(f"fetch_spy_return returned None for {target_date}")
+                prev_close = self._market.fetch_close(ticker, prev_trading_day)
 
-            stock_20d_vol = self._market.fetch_stock_vol(
-                ticker, target_date, vol_lookback_days
-            )
-            if stock_20d_vol is None or stock_20d_vol == 0.0:
-                raise ValueError(
-                    f"fetch_stock_vol returned unusable value={stock_20d_vol} "
-                    f"for {ticker} on {target_date}"
+                spy_return = self._market.fetch_spy_return(target_date)
+                if spy_return is None:
+                    raise ValueError(f"fetch_spy_return returned None for {target_date}")
+
+                stock_20d_vol = self._market.fetch_stock_vol(
+                    ticker, target_date, vol_lookback_days
+                )
+                if stock_20d_vol is None or stock_20d_vol == 0.0:
+                    raise ValueError(
+                        f"fetch_stock_vol returned unusable value={stock_20d_vol} "
+                        f"for {ticker} on {target_date}"
+                    )
+
+                _fetch_ok = True
+                break
+            except Exception as exc:
+                last_exc = exc
+                exc_str = str(exc)
+                is_rate_limit = (
+                    "Too Many Requests" in exc_str
+                    or "Rate limit" in exc_str
+                    or "rate limit" in exc_str.lower()
+                )
+                if is_rate_limit:
+                    # Yahoo rate-limit window is 15+ min — don't retry, mark unavailable.
+                    logger.warning(
+                        "Yahoo rate-limited for %s — marking unavailable immediately",
+                        ticker,
+                    )
+                    break
+                logger.warning(
+                    "Price fetch transient error for %s (attempt %d/2): %s",
+                    ticker, attempt + 1, exc,
                 )
 
-        except Exception as exc:
+        if not _fetch_ok:
+            exc = last_exc
             logger.warning(
                 "Price fetch failed for signal id=%s ticker=%s: %s — marking unavailable",
                 signal_id,

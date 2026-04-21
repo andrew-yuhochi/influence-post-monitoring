@@ -176,6 +176,18 @@ def _resolve_company_to_ticker(company_name: str) -> str | None:
     Cached to avoid repeated API calls for the same name.
     Returns None if resolution fails.
     """
+    # Skip strings that cannot be valid ticker symbols: too long, contain
+    # spaces, or contain non-ASCII characters (emoji, accented letters, etc.)
+    if (
+        len(company_name) > 6
+        or " " in company_name
+        or not company_name.isascii()
+    ):
+        logger.debug(
+            "Yahoo Finance: skipping invalid ticker candidate '%s'", company_name
+        )
+        return None
+
     try:
         results = yf.Search(company_name)
         quotes = getattr(results, "quotes", [])

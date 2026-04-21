@@ -7,6 +7,7 @@ CLI:
     python -m influence_monitor.pipeline morning [--dry-run] [--account-limit N] [--use-fixtures]
     python -m influence_monitor.pipeline evening [--dry-run] [--use-fixtures]
     python -m influence_monitor.pipeline poll [--dry-run]
+    python -m influence_monitor.pipeline validate [--days-back 60] [--dry-run]
 
 The orchestrator is fully synchronous from the outside; async twikit calls
 are wrapped with asyncio.run() at the ingestion call-site only.
@@ -19,7 +20,7 @@ import json
 import logging
 import sys
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -402,6 +403,9 @@ class PipelineOrchestrator:
         account_limit: int | None = None,
         dry_run: bool = False,
         use_fixtures: bool = False,
+        since_override: datetime | None = None,
+        max_pages: int = 1,
+        suppress_delivery: bool = False,
     ) -> None:
         """Execute the 13-step morning alert pipeline.
 
@@ -416,11 +420,23 @@ class PipelineOrchestrator:
         use_fixtures:
             Bypass twikit + Claude; load pre-scored signals from
             tests/fixtures/sample_signals.json and run steps 10–13 only.
+        since_override:
+            When set (validate mode only), skip the trading-day gate and use this
+            datetime as the collection window start instead of prev_close_dt.
+            After fetching, all posts are re-timestamped to simulate overnight posts.
+        max_pages:
+            Maximum twikit pages to fetch per account (default 1; raised to 3 in
+            validate mode for deeper backfill).
+        suppress_delivery:
+            When True, suppress all WhatsApp delivery (and operational messages)
+            regardless of dry_run.  DB write blocks are unaffected — only used by
+            run_validate to allow real DB writes with no delivery side-effects.
         """
         start_ts = monotonic()
         logger.info(
-            "run_morning START — date=%s dry_run=%s use_fixtures=%s account_limit=%s",
-            run_date, dry_run, use_fixtures, account_limit,
+            "run_morning START — date=%s dry_run=%s use_fixtures=%s account_limit=%s"
+            " since_override=%s max_pages=%d",
+            run_date, dry_run, use_fixtures, account_limit, since_override, max_pages,
         )
 
         # Fixtures short-circuit
@@ -452,7 +468,7 @@ class PipelineOrchestrator:
                     f"Component: AccountRegistry\n"
                     f"Error: All primary accounts inactive\n"
                     f"Check accounts table.",
-                    dry_run=dry_run,
+                    dry_run=dry_run or suppress_delivery,
                 )
                 if not dry_run:
                     self._repo.upsert_daily_summary(
@@ -479,28 +495,36 @@ class PipelineOrchestrator:
             # ------------------------------------------------------------------
             logger.info("STEP 2 START — TradingCalendar.is_trading_day + collection_window")
 
-            if not self._calendar.is_trading_day(run_date):
+            if since_override is not None:
+                # Validate mode: skip trading-day gate and use the caller-supplied window.
+                prev_close_dt = since_override
+                send_time_dt = datetime.now(tz=timezone.utc)
                 logger.info(
-                    "STEP 2 DONE — %s is not a trading day — short-circuiting", run_date
+                    "STEP 2 DONE — validate mode: collection window overridden to %s → %s",
+                    prev_close_dt, send_time_dt,
                 )
-                return
+            else:
+                if not self._calendar.is_trading_day(run_date):
+                    logger.info(
+                        "STEP 2 DONE — %s is not a trading day — short-circuiting", run_date
+                    )
+                    return
 
-            now_et = datetime.now(tz=self._calendar._calendar.tz if hasattr(self._calendar._calendar, 'tz') else timezone.utc)
-            from zoneinfo import ZoneInfo
-            et = ZoneInfo("America/New_York")
-            now_et = datetime.now(tz=et)
-            try:
-                prev_close_dt, send_time_dt = self._calendar.collection_window(now_et)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("collection_window failed (%s) — using 24h lookback", exc)
-                from datetime import timedelta
-                prev_close_dt = now_et - timedelta(hours=24)
-                send_time_dt = now_et
+                now_et = datetime.now(tz=self._calendar._calendar.tz if hasattr(self._calendar._calendar, 'tz') else timezone.utc)
+                from zoneinfo import ZoneInfo
+                et = ZoneInfo("America/New_York")
+                now_et = datetime.now(tz=et)
+                try:
+                    prev_close_dt, send_time_dt = self._calendar.collection_window(now_et)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("collection_window failed (%s) — using 24h lookback", exc)
+                    prev_close_dt = now_et - timedelta(hours=24)
+                    send_time_dt = now_et
 
-            logger.info(
-                "STEP 2 DONE — collection window: %s → %s",
-                prev_close_dt, send_time_dt,
-            )
+                logger.info(
+                    "STEP 2 DONE — collection window: %s → %s",
+                    prev_close_dt, send_time_dt,
+                )
 
             # ------------------------------------------------------------------
             # STEP 3 — Fetch posts for each account
@@ -516,6 +540,9 @@ class PipelineOrchestrator:
                     self._account_registry.fetch_all_accounts(
                         since=prev_close_dt,
                         max_count=self._settings.max_posts_per_account,
+                        max_pages=max_pages,
+                        inter_account_delay=5.0 if since_override else 0.0,
+                        rate_limit_retry_delay=60.0 if since_override else 0.0,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -526,6 +553,30 @@ class PipelineOrchestrator:
                 "STEP 3 DONE — %d posts from %d/%d accounts (%d failed)",
                 len(all_posts), success_count, len(active_accounts), failure_count,
             )
+
+            # Validate mode: re-timestamp all posts to simulate overnight posts today.
+            # Spreads them uniformly across yesterday 20:00 UTC → today 07:00 UTC.
+            if since_override is not None and all_posts:
+                now_utc = datetime.now(tz=timezone.utc)
+                window_start_ts = (now_utc - timedelta(days=1)).replace(
+                    hour=20, minute=0, second=0, microsecond=0
+                )
+                window_end_ts = now_utc.replace(
+                    hour=7, minute=0, second=0, microsecond=0
+                )
+                # If we're currently before 07:00 UTC, end_ts is today; otherwise
+                # it's already correct.  Ensure the window is at least 1 second wide.
+                window_seconds = max(
+                    (window_end_ts - window_start_ts).total_seconds(), 1.0
+                )
+                step_secs = window_seconds / len(all_posts)
+                for idx, post in enumerate(all_posts):
+                    new_ts = window_start_ts + timedelta(seconds=idx * step_secs)
+                    post.posted_at = new_ts
+                logger.info(
+                    "STEP 3 (validate) — re-timestamped %d posts across %s → %s",
+                    len(all_posts), window_start_ts.isoformat(), window_end_ts.isoformat(),
+                )
 
             # ------------------------------------------------------------------
             # STEP 4 — Extract tickers per post
@@ -869,7 +920,7 @@ class PipelineOrchestrator:
             # ------------------------------------------------------------------
             logger.info("STEP 12 START — WhatsApp delivery")
             for msg in messages:
-                self._deliver(msg, kind="morning", dry_run=dry_run)
+                self._deliver(msg, kind="morning", dry_run=dry_run or suppress_delivery)
             logger.info("STEP 12 DONE — delivery complete")
 
             # ------------------------------------------------------------------
@@ -904,7 +955,7 @@ class PipelineOrchestrator:
                 f"⚠️ Pipeline FAILED — {run_date} morning\n"
                 f"Error: {type(exc).__name__}: {str(exc)[:200]}\n"
                 f"Check Actions logs.",
-                dry_run=dry_run,
+                dry_run=dry_run or suppress_delivery,
             )
             if not dry_run:
                 self._repo.upsert_daily_summary(
@@ -1024,6 +1075,7 @@ class PipelineOrchestrator:
         run_date: date,
         dry_run: bool = False,
         use_fixtures: bool = False,
+        suppress_delivery: bool = False,
     ) -> None:
         """Execute the evening summary pipeline.
 
@@ -1045,6 +1097,10 @@ class PipelineOrchestrator:
         use_fixtures:
             Bypass OutcomeEngine; insert pre-computed outcomes from
             tests/fixtures/sample_outcomes.json and run from step 4 onward.
+        suppress_delivery:
+            When True, suppress all WhatsApp delivery (and operational messages)
+            regardless of dry_run.  DB write blocks are unaffected — only used by
+            run_validate to allow real DB writes with no delivery side-effects.
         """
         start_ts = monotonic()
         logger.info(
@@ -1124,7 +1180,7 @@ class PipelineOrchestrator:
             # ------------------------------------------------------------------
             logger.info("STEP 6 START — WhatsApp delivery")
             for msg in messages:
-                self._deliver(msg, kind="evening", dry_run=dry_run)
+                self._deliver(msg, kind="evening", dry_run=dry_run or suppress_delivery)
             logger.info("STEP 6 DONE — delivery complete")
 
             # ------------------------------------------------------------------
@@ -1167,7 +1223,7 @@ class PipelineOrchestrator:
                 f"⚠️ Evening Pipeline FAILED — {run_date}\n"
                 f"Error: {type(exc).__name__}: {str(exc)[:200]}\n"
                 f"Check Actions logs.",
-                dry_run=dry_run,
+                dry_run=dry_run or suppress_delivery,
             )
             if not dry_run:
                 self._repo.upsert_daily_summary(
@@ -1233,7 +1289,6 @@ class PipelineOrchestrator:
             logger.info("run_poll: %d active accounts", len(active_accounts))
 
             # Determine collection window: last 2h (matches poll cadence)
-            from datetime import timedelta
             window_start = datetime.now(tz=et_tz) - timedelta(hours=2)
 
             # Fetch posts
@@ -1317,6 +1372,85 @@ class PipelineOrchestrator:
             logger.exception("run_poll unhandled exception: %s", exc)
             raise
 
+    # ------------------------------------------------------------------
+    # run_validate — one-shot end-to-end validation tool
+    # ------------------------------------------------------------------
+
+    def run_validate(self, days_back: int = 60, dry_run: bool = False) -> None:
+        """Fetch N days of real posts, re-timestamp them to simulate overnight,
+        then run the full morning alert + evening summary pipeline end-to-end.
+
+        Both morning and evening pipelines always perform real DB writes.
+        WhatsApp delivery is always suppressed regardless of dry_run.
+
+        Parameters
+        ----------
+        days_back:
+            How many calendar days back to fetch posts from (default 60).
+        dry_run:
+            When True, delete all data inserted during this run after both
+            pipelines complete, restoring the DB to its pre-run state.
+            When False (default), keep the inserted data.
+        """
+        run_date = date.today()
+        since = datetime.now(tz=timezone.utc) - timedelta(days=days_back)
+
+        # Record start time for cleanup timestamp filtering.
+        run_start = datetime.now(tz=timezone.utc)
+
+        logger.info(
+            "run_validate START — days_back=%d since=%s dry_run=%s run_start=%s",
+            days_back, since.isoformat(), dry_run, run_start.isoformat(),
+        )
+
+        try:
+            # Morning pipeline — real DB writes, real WhatsApp delivery.
+            # since_override activates: skip trading-day gate, override window,
+            # re-timestamp posts, pass max_pages=3 to twikit.
+            self.run_morning(
+                run_date=run_date,
+                dry_run=False,
+                since_override=since,
+                max_pages=3,
+            )
+
+            # Evening pipeline — real DB writes, real WhatsApp delivery.
+            # Uses signals persisted by the morning run above.
+            self.run_evening(
+                run_date=run_date,
+                dry_run=False,
+            )
+
+        finally:
+            if dry_run:
+                cutoff = run_start.isoformat()
+                logger.info(
+                    "run_validate CLEANUP — deleting all data inserted since %s", cutoff
+                )
+                self._repo._execute_write(
+                    "DELETE FROM signals WHERE created_at >= ?", [cutoff]
+                )
+                self._repo._execute_write(
+                    "DELETE FROM posts WHERE fetched_at >= ?", [cutoff]
+                )
+                self._repo._execute_write(
+                    "DELETE FROM retweeters WHERE fetched_at >= ?", [cutoff]
+                )
+                self._repo._execute_write(
+                    "DELETE FROM daily_summaries WHERE created_at >= ?", [cutoff]
+                )
+                self._repo._execute_write(
+                    "DELETE FROM messages_sent WHERE sent_at >= ?", [cutoff]
+                )
+                self._repo._execute_write(
+                    "DELETE FROM engagement_snapshots WHERE snapshot_at >= ?", [cutoff]
+                )
+                logger.info(
+                    "run_validate CLEANUP DONE — validate run complete, DB restored to pre-run state"
+                )
+
+        logger.info("run_validate DONE — morning + evening pipelines complete")
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point
@@ -1398,6 +1532,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Log what would be written; do not touch the DB",
     )
 
+    # ------------------------------------------------------------------
+    # validate subcommand — one-shot end-to-end validation tool
+    # ------------------------------------------------------------------
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help=(
+            "Backfill validation run: fetch N days of real posts, re-timestamp them "
+            "to simulate overnight posts, then run the full morning + evening pipeline. "
+            "Use --dry-run to render to stdout without sending messages or writing to DB."
+        ),
+    )
+    validate_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=60,
+        metavar="N",
+        help="How many calendar days back to fetch posts from (default: 60)",
+    )
+    validate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run everything (fetch, score, DB writes, WhatsApp delivery) then delete all inserted data — DB is restored to pre-run state.",
+    )
+
     return parser
 
 
@@ -1455,6 +1613,11 @@ def main() -> None:
             )
         elif args.command == "poll":
             orchestrator.run_poll(dry_run=args.dry_run)
+        elif args.command == "validate":
+            orchestrator.run_validate(
+                days_back=getattr(args, "days_back", 60),
+                dry_run=args.dry_run,
+            )
         else:
             logger.error("Unknown command: %s", args.command)
             sys.exit(1)
