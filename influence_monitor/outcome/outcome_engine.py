@@ -53,14 +53,21 @@ class OutcomeEngine:
         self,
         target_date: date,
         tenant_id: int = 1,
+        shown_only: bool = True,
     ) -> int:
-        """Compute and persist outcome metrics for all unscored signals on *target_date*.
+        """Compute and persist outcome metrics for signals on *target_date*.
+
+        By default only processes signals that were shown in the morning alert
+        (shown_only=True), matching the 1-to-1 morning→evening mapping requirement.
+        Pass shown_only=False to process all signals (e.g. backfill/admin runs).
 
         Skips any signal whose excess_vol_score is already non-null (idempotent).
 
         Args:
             target_date: The trading day the signals were generated for.
             tenant_id:   Tenant scope.
+            shown_only:  When True (default), restrict to signals with
+                         shown_in_morning_alert = 1.
 
         Returns:
             Number of signals actually processed (i.e. scored, not skipped).
@@ -68,17 +75,23 @@ class OutcomeEngine:
         config = self._repo.get_scoring_config(tenant_id=tenant_id)
         vol_lookback_days = int(config.get("vol_lookback_days", 20))
 
-        signals = self._repo.get_signals_for_date(target_date, tenant_id=tenant_id)
+        signals = self._repo.get_signals_for_date(
+            target_date, tenant_id=tenant_id, shown_only=shown_only
+        )
         if not signals:
-            logger.info("compute_and_store(%s): no signals found", target_date)
+            logger.info(
+                "compute_and_store(%s): no signals found (shown_only=%s)",
+                target_date, shown_only,
+            )
             return 0
 
         prev_trading_day = self._calendar.previous_trading_day(target_date)
         logger.info(
-            "compute_and_store(%s): prev_trading_day=%s, %d signal(s) total",
+            "compute_and_store(%s): prev_trading_day=%s, %d signal(s) total (shown_only=%s)",
             target_date,
             prev_trading_day,
             len(signals),
+            shown_only,
         )
 
         processed = 0

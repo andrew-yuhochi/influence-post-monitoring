@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS signals (
     penalty_applied         REAL DEFAULT 0,
     final_score             REAL,
     tier                    TEXT NOT NULL,
+    shown_in_morning_alert  INTEGER NOT NULL DEFAULT 0,
     morning_rank            INTEGER,
     -- Outcome (evening pass — NULL until then)
     prev_close              REAL,
@@ -194,6 +195,7 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE INDEX IF NOT EXISTS idx_signals_date ON signals(signal_date, tenant_id);
 CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker, signal_date);
 CREATE INDEX IF NOT EXISTS idx_signals_account ON signals(account_id, signal_date);
+CREATE INDEX IF NOT EXISTS idx_signals_shown ON signals(signal_date, tenant_id, shown_in_morning_alert);
 
 -- Message delivery log
 CREATE TABLE IF NOT EXISTS messages_sent (

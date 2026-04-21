@@ -915,6 +915,14 @@ class PipelineOrchestrator:
                 "STEP 11 DONE — %d message parts rendered", len(messages)
             )
 
+            # Collect (ticker, handle) pairs for signals that were rendered so the
+            # evening pipeline can do a 1-to-1 morning→evening mapping.
+            rendered_tickers_handles: set[tuple[str, str]] = set()
+            for sig in act_now_morning + watch_morning:
+                rendered_tickers_handles.add(
+                    (sig.ticker.upper(), sig.posters[0].handle.lower())
+                )
+
             # ------------------------------------------------------------------
             # STEP 12 — Send via WhatsApp delivery chain
             # ------------------------------------------------------------------
@@ -922,6 +930,23 @@ class PipelineOrchestrator:
             for msg in messages:
                 self._deliver(msg, kind="morning", dry_run=dry_run or suppress_delivery)
             logger.info("STEP 12 DONE — delivery complete")
+
+            # Mark the rendered signals in DB so the evening pipeline sees only them.
+            if not dry_run and rendered_tickers_handles:
+                all_today = self._repo.get_signals_for_date(run_date, tenant_id=1)
+                shown_ids = [
+                    row["id"] for row in all_today
+                    if (
+                        row["ticker"].upper(),
+                        (row.get("account_handle") or "").lower(),
+                    ) in rendered_tickers_handles
+                ]
+                if shown_ids:
+                    self._repo.mark_signals_shown_in_morning(shown_ids)
+                    logger.info(
+                        "STEP 12 — marked %d signal(s) as shown_in_morning_alert",
+                        len(shown_ids),
+                    )
 
             # ------------------------------------------------------------------
             # STEP 13 — Write daily_summaries and messages_sent
@@ -1154,14 +1179,15 @@ class PipelineOrchestrator:
             )
 
             # ------------------------------------------------------------------
-            # STEP 4 — Load signals for today
+            # STEP 4 — Load signals for today (only those shown in morning alert)
             # ------------------------------------------------------------------
-            logger.info("STEP 4 START — loading signals for %s", run_date)
+            logger.info("STEP 4 START — loading morning-shown signals for %s", run_date)
             signals = self._repo.get_signals_for_date(
                 signal_date=run_date,
                 tenant_id=1,
+                shown_only=not use_fixtures,
             )
-            logger.info("STEP 4 DONE — %d signals loaded", len(signals))
+            logger.info("STEP 4 DONE — %d signal(s) loaded (shown_only=%s)", len(signals), not use_fixtures)
 
             # ------------------------------------------------------------------
             # STEP 5 — render_evening

@@ -303,6 +303,15 @@ class SignalRepository:
         if not self._is_libsql:
             assert isinstance(self._backend, _Sqlite3Backend)
             self._backend.commit()
+        # Migration guard: add shown_in_morning_alert to existing DBs.
+        # The CREATE TABLE in schema.sql already includes the column for fresh DBs;
+        # this ALTER TABLE is a no-op on new DBs but adds the column on older ones.
+        try:
+            self._execute_write(
+                "ALTER TABLE signals ADD COLUMN shown_in_morning_alert INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # column already exists
         logger.info("Schema initialised")
 
     # ------------------------------------------------------------------
@@ -688,18 +697,37 @@ class SignalRepository:
             values,
         )
 
+    def mark_signals_shown_in_morning(self, signal_ids: list[int]) -> None:
+        """Mark the given signal IDs as shown in the morning alert."""
+        for sid in signal_ids:
+            self._execute_write(
+                "UPDATE signals SET shown_in_morning_alert = 1 WHERE id = ?",
+                [sid],
+            )
+
     def get_signals_for_date(
         self,
         signal_date: date,
         tenant_id: int = 1,
+        shown_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return all signals for a given date and tenant."""
+        """Return signals for a given date and tenant.
+
+        Args:
+            signal_date: The date to query.
+            tenant_id:   Tenant scope (default 1).
+            shown_only:  When True, only return signals that were shown in the
+                         morning alert (shown_in_morning_alert = 1).  Defaults to
+                         False so that the morning pipeline and any admin queries
+                         still see all scored signals.
+        """
+        where_extra = " AND s.shown_in_morning_alert = 1" if shown_only else ""
         return self._execute(
-            """SELECT s.*, a.handle AS account_handle, a.display_name AS account_display_name,
+            f"""SELECT s.*, a.handle AS account_handle, a.display_name AS account_display_name,
                       a.credibility_score AS account_credibility
                FROM signals s
                JOIN accounts a ON s.account_id = a.id
-               WHERE s.signal_date = ? AND s.tenant_id = ?
+               WHERE s.signal_date = ? AND s.tenant_id = ?{where_extra}
                ORDER BY s.final_score DESC""",
             [signal_date.isoformat(), tenant_id],
         )
