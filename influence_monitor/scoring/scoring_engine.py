@@ -405,15 +405,6 @@ class ScoringEngine:
                 ) * 10.0
                 score_virality_vel = f2b
                 score_virality_abs = f2a  # still record the raw value
-            elif tier == "ACT_NOW":
-                conviction_score = (
-                    self._w_credibility * f1
-                    + self._w_virality_abs * f2a
-                    + self._w_consensus * f3
-                    # F4 not included until TASK-009 wires it in
-                ) * 10.0
-                score_virality_vel = None  # NULL for ACT_NOW
-                score_virality_abs = f2a
             else:
                 # UNSCORED path (shouldn't reach here due to gate above, but defensive)
                 conviction_score = 0.0
