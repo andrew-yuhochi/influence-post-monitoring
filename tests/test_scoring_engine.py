@@ -180,11 +180,14 @@ class TestSignalClassifier:
 
     def test_act_now_views(self) -> None:
         clf = self._make_classifier()
-        assert clf.classify(50_000, 0, 5_000, 5.0, "LONG", 4) == "ACT_NOW"
+        # Classifier no longer returns ACT_NOW — that is assigned downstream by the pipeline.
+        # High views + high vph → WATCH.
+        assert clf.classify(50_000, 0, 5_000, 5.0, "LONG", 4) == "WATCH"
 
     def test_act_now_reposts(self) -> None:
         clf = self._make_classifier()
-        assert clf.classify(0, 500, 5_000, 5.0, "LONG", 4) == "ACT_NOW"
+        # Classifier no longer returns ACT_NOW — high reposts + high vph → WATCH.
+        assert clf.classify(0, 500, 5_000, 5.0, "LONG", 4) == "WATCH"
 
     def test_watch_velocity(self) -> None:
         clf = self._make_classifier()
@@ -217,11 +220,12 @@ class TestScoringEngineSinglePost:
     def test_act_now_signal_all_scores_populated(self) -> None:
         repo = _make_repo()
         engine = ScoringEngine(repo)
+        # 60k views + high vph → WATCH (ACT_NOW is assigned downstream by the pipeline)
         inp = _make_input(views=60_000, reposts=600, credibility=8.0)
         results = engine.score([inp])
         assert len(results) == 1
         sig = results[0]
-        assert sig.tier == "ACT_NOW"
+        assert sig.tier == "WATCH"
         assert sig.score_credibility == pytest.approx(0.8, abs=0.001)
         assert sig.score_virality_abs is not None
         assert sig.score_consensus is not None
@@ -230,27 +234,29 @@ class TestScoringEngineSinglePost:
         assert sig.conviction_score > 0
 
     def test_conviction_score_formula(self) -> None:
-        """Verify conviction_score = (w_cred*F1 + w_vir*F2a + w_cons*F3) * 10 for ACT_NOW."""
+        """Verify conviction_score uses WATCH path: (w_cred*F1 + w_vir_vel*F2b + w_cons*F3) * 10."""
         repo = _make_repo()
         engine = ScoringEngine(repo)
-        # views=60000, threshold=50000 → F2a = 1.0
+        # views=60000 → vph = 60000/8.5h ≈ 7058 → F2b = min(7058/1000, 1.0) = 1.0
         # credibility=8.0 → F1 = 0.8
         # distinct_same=1, total=1 → F3 = 1.0
         inp = _make_input(views=60_000, reposts=0, credibility=8.0, distinct_same=1, total_distinct=1)
         results = engine.score([inp])
         sig = results[0]
-        # Expected: (0.25*0.8 + 0.35*1.0 + 0.25*1.0) * 10 = (0.2 + 0.35 + 0.25) * 10 = 8.0
-        assert sig.conviction_score == pytest.approx(8.0, abs=0.01)
+        # Expected: (0.25*0.8 + 0.15*1.0 + 0.25*1.0) * 10 = (0.20 + 0.15 + 0.25) * 10 = 6.0
+        assert sig.conviction_score == pytest.approx(6.0, abs=0.01)
 
     def test_f3_partial_consensus(self) -> None:
-        """F3 with 1 of 3 posters in same direction reduces score."""
+        """F3 with 1 of 3 posters in same direction reduces score (WATCH path)."""
         repo = _make_repo()
         engine = ScoringEngine(repo)
         inp = _make_input(views=60_000, reposts=0, credibility=8.0, distinct_same=1, total_distinct=3)
         results = engine.score([inp])
         sig = results[0]
         # F3 = 1/3 ≈ 0.333
-        expected = (0.25 * 0.8 + 0.35 * 1.0 + 0.25 * (1 / 3)) * 10
+        # WATCH path: (w_cred*F1 + w_vir_vel*F2b + w_cons*F3) * 10
+        # vph ≈ 7058 → F2b = 1.0
+        expected = (0.25 * 0.8 + 0.15 * 1.0 + 0.25 * (1 / 3)) * 10
         assert sig.conviction_score == pytest.approx(expected, abs=0.01)
 
     def test_f4_amplifier_none_until_task009(self) -> None:
@@ -267,14 +273,14 @@ class TestScoringEngineSinglePost:
         results = engine.score([inp])
         assert results[0].liquidity_modifier is None
 
-    def test_virality_vel_none_for_act_now(self) -> None:
-        """F2b (virality_vel) must be NULL for ACT_NOW signals."""
+    def test_virality_vel_populated_for_watch(self) -> None:
+        """F2b (virality_vel) must be non-None for WATCH tier signals."""
         repo = _make_repo()
         engine = ScoringEngine(repo)
-        inp = _make_input(views=60_000, reposts=0)  # ACT_NOW via views
+        inp = _make_input(views=60_000, reposts=0)  # high vph → WATCH
         results = engine.score([inp])
-        assert results[0].tier == "ACT_NOW"
-        assert results[0].score_virality_vel is None
+        assert results[0].tier == "WATCH"
+        assert results[0].score_virality_vel is not None
 
     def test_virality_vel_populated_for_watch(self) -> None:
         """F2b must be non-None for WATCH tier signals."""
@@ -660,9 +666,11 @@ class TestTierThresholds:
     def test_exactly_at_views_threshold_is_act_now(self) -> None:
         repo = _make_repo()
         engine = ScoringEngine(repo)
+        # 50k views / 8.5h ≈ 5882 vph → above vel floor → WATCH
+        # (ACT_NOW is assigned downstream by the pipeline after sorting)
         inp = _make_input(views=50_000, reposts=0)
         results = engine.score([inp])
-        assert results[0].tier == "ACT_NOW"
+        assert results[0].tier == "WATCH"
 
     def test_one_below_views_threshold_watch_if_vel_sufficient(self) -> None:
         repo = _make_repo()
@@ -676,6 +684,8 @@ class TestTierThresholds:
     def test_exactly_at_reposts_threshold_is_act_now(self) -> None:
         repo = _make_repo()
         engine = ScoringEngine(repo)
+        # 100 views / 8.5h ≈ 11.8 vph → below vel floor of 1000 → UNSCORED
+        # Reposts alone no longer gate WATCH; velocity (vph) is the sole classifier signal.
         inp = _make_input(views=100, reposts=500)
         results = engine.score([inp])
-        assert results[0].tier == "ACT_NOW"
+        assert results[0].tier == "UNSCORED"
