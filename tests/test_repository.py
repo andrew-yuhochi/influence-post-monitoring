@@ -303,7 +303,7 @@ def test_seed_scoring_config_count(seeded_repo: SignalRepository) -> None:
     rows = seeded_repo._execute(
         "SELECT COUNT(*) AS cnt FROM scoring_config"
     )
-    assert rows[0]["cnt"] == 19, f"Expected 19 scoring_config rows, got {rows[0]['cnt']}"
+    assert rows[0]["cnt"] == 21, f"Expected 21 scoring_config rows, got {rows[0]['cnt']}"
 
 
 def test_seed_total_accounts_is_45(seeded_repo: SignalRepository) -> None:
@@ -853,7 +853,7 @@ def test_scoring_config_seed_exists() -> None:
 def test_scoring_config_seed_has_19_rows() -> None:
     """config/scoring_config_seed.json must have exactly 19 rows."""
     data = json.loads((CONFIG_DIR / "scoring_config_seed.json").read_text())
-    assert len(data) == 19, f"Expected 19 scoring_config rows, got {len(data)}"
+    assert len(data) == 21, f"Expected 21 scoring_config rows, got {len(data)}"
 
 
 def test_scoring_config_seed_all_have_key_and_value() -> None:

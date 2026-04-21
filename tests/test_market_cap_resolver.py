@@ -92,7 +92,7 @@ def test_resolve_mega_cap(tmp_path) -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("3911.50B")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("3911.50B")
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("BRK.A")
@@ -113,7 +113,7 @@ def test_resolve_small_cap() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("498.22M")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("498.22M")
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("SMID")
@@ -130,7 +130,7 @@ def test_resolve_empty_market_cap_returns_micro() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = {"Market Cap": "", "Sector": None, "Industry": None}
+        mock_stock.ticker_fundament.return_value = {"Market Cap": "", "Sector": None, "Industry": None}
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("OTC")
@@ -174,7 +174,7 @@ def test_cache_miss_calls_finvizfinance_and_caches() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("25.50B", "Technology", "Software")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("25.50B", "Technology", "Software")
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("MSFT")
@@ -213,7 +213,7 @@ def test_ticker_normalised_to_upper_case() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("10.00B")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("10.00B")
 
         resolver = MarketCapResolver(repo)
         resolver.resolve("tsla")
@@ -231,7 +231,7 @@ def test_resolve_large_cap_modifier() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("25.00B")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("25.00B")
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("AAPL")
@@ -248,7 +248,7 @@ def test_resolve_mid_cap_modifier() -> None:
     with patch("finvizfinance.quote.finvizfinance") as mock_fvf:
         mock_stock = MagicMock()
         mock_fvf.return_value = mock_stock
-        mock_stock.TickerFundamentals.return_value = _make_fundamentals("3.50B")
+        mock_stock.ticker_fundament.return_value = _make_fundamentals("3.50B")
 
         resolver = MarketCapResolver(repo)
         cap_class, modifier = resolver.resolve("MID")

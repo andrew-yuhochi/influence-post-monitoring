@@ -718,6 +718,7 @@ def _seed_outcome_signals(
             engagement_views=50000,
             engagement_reposts=1000,
             views_per_hour=4000.0,
+            shown_in_morning_alert=1,
             prev_close=sig.get("prev_close"),
             today_open=sig.get("today_open"),
             today_close=sig.get("today_close"),

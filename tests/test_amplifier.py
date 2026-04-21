@@ -63,7 +63,9 @@ def _make_repo(
 
 def _make_source(retweeters: list[Retweeter]) -> MagicMock:
     source = MagicMock()
-    source.fetch_retweeters.return_value = retweeters
+    async def _fake_fetch(*args, **kwargs):
+        return retweeters
+    source.fetch_retweeters = _fake_fetch
     return source
 
 
@@ -137,7 +139,9 @@ def test_fetch_retweeters_exception_returns_zero_and_logs(caplog: pytest.LogCapt
     """fetch_retweeters raising → returns 0.0, logs WARNING, does not re-raise."""
     repo = _make_repo()
     source = MagicMock()
-    source.fetch_retweeters.side_effect = RuntimeError("API timeout")
+    async def _fake_fetch_raises(*args, **kwargs):
+        raise RuntimeError("API timeout")
+    source.fetch_retweeters = _fake_fetch_raises
     fetcher = AmplifierFetcher(repo)
 
     with caplog.at_level(logging.WARNING, logger="influence_monitor.scoring.amplifier"):
@@ -217,22 +221,36 @@ def test_three_monitored_matches() -> None:
 def test_skipped_for_watch_tier() -> None:
     """fetch_and_score returns 0.0 and does NOT call fetch_retweeters for WATCH tier."""
     repo = _make_repo()
-    source = _make_source([_make_retweeter("user_001", followers_count=500_000)])
+    retweeters = [_make_retweeter("user_001", followers_count=500_000)]
+    call_count = [0]
+
+    source = MagicMock()
+    async def _fake_fetch(*args, **kwargs):
+        call_count[0] += 1
+        return retweeters
+    source.fetch_retweeters = _fake_fetch
     fetcher = AmplifierFetcher(repo)
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1, tier="WATCH")
 
     assert score == 0.0
-    source.fetch_retweeters.assert_not_called()
+    assert call_count[0] == 0, "fetch_retweeters must not be called for WATCH tier"
 
 
 def test_skipped_for_unscored_tier() -> None:
     """fetch_and_score returns 0.0 and does NOT call fetch_retweeters for UNSCORED tier."""
     repo = _make_repo()
-    source = _make_source([_make_retweeter("user_002", followers_count=500_000)])
+    retweeters = [_make_retweeter("user_002", followers_count=500_000)]
+    call_count = [0]
+
+    source = MagicMock()
+    async def _fake_fetch(*args, **kwargs):
+        call_count[0] += 1
+        return retweeters
+    source.fetch_retweeters = _fake_fetch
     fetcher = AmplifierFetcher(repo)
 
     score = fetcher.fetch_and_score(_make_post(), source, post_db_id=1, tier="UNSCORED")
 
     assert score == 0.0
-    source.fetch_retweeters.assert_not_called()
+    assert call_count[0] == 0, "fetch_retweeters must not be called for UNSCORED tier"

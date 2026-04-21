@@ -82,6 +82,7 @@ def _insert_signal(
         tier="act_now",
         extraction_confidence=0.9,
         final_score=7.0,
+        shown_in_morning_alert=1,
     )
     if excess_vol_score is not None:
         kwargs["excess_vol_score"] = excess_vol_score
