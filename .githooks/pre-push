@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# pre-push hook — runs the unit/fast test suite before every push.
+#
+# Integration tests (marked @pytest.mark.integration) are excluded because
+# they hit live external APIs and are not suitable for a pre-push gate.
+# Run them separately with: pytest tests/ -m integration
+#
+# To bypass in a genuine emergency: git push --no-verify
+# (This should be exceptional — the gate exists to protect the remote.)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VENV="$REPO_ROOT/venv/bin/activate"
+
+if [ ! -f "$VENV" ]; then
+    echo "ERROR: virtualenv not found at $VENV"
+    echo "Create it with: python -m venv venv && pip install -r requirements.txt"
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$VENV"
+
+echo "Running test suite before push..."
+if python -m pytest tests/ -q -m "not integration"; then
+    echo "All tests passed — proceeding with push."
+    exit 0
+else
+    echo ""
+    echo "Tests failed — push aborted."
+    echo "Fix the failing tests, then retry. To skip in an emergency: git push --no-verify"
+    exit 1
+fi
