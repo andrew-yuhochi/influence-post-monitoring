@@ -193,6 +193,26 @@ class _LibsqlBackend:
                     f"Turso executescript error at statement {i}: {res.get('error')}"
                 )
 
+    def execute_returning_lastrowid(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+    ) -> int | None:
+        """Execute a write statement and return last_insert_rowid from the response."""
+        requests = [
+            self._build_execute_request(sql, params),
+            {"type": "close"},
+        ]
+        results = self._post_pipeline(requests)
+        execute_result = results[0]
+        if execute_result.get("type") == "error":
+            raise RuntimeError(f"Turso execute error: {execute_result.get('error')}")
+        inner = execute_result["response"]["result"]
+        rowid = inner.get("last_insert_rowid")
+        if rowid is not None:
+            return int(rowid)
+        return None
+
     def close(self) -> None:
         self._client.close()
 
@@ -280,8 +300,8 @@ class SignalRepository:
     def _execute_write(self, sql: str, params: list[Any] | None = None) -> int | None:
         """Execute a write statement; return lastrowid when available."""
         if self._is_libsql:
-            self._backend.execute(sql, params)
-            return None
+            assert isinstance(self._backend, _LibsqlBackend)
+            return self._backend.execute_returning_lastrowid(sql, params)
         else:
             assert isinstance(self._backend, _Sqlite3Backend)
             return self._backend.execute_returning_lastrowid(sql, params)
@@ -312,6 +332,13 @@ class SignalRepository:
             )
         except Exception:
             pass  # column already exists
+        try:
+            self._execute_write(
+                "CREATE INDEX IF NOT EXISTS idx_signals_shown"
+                " ON signals(signal_date, tenant_id, shown_in_morning_alert)"
+            )
+        except Exception:
+            pass  # index already exists
         logger.info("Schema initialised")
 
     # ------------------------------------------------------------------
@@ -377,6 +404,16 @@ class SignalRepository:
                 [tenant_id, row["key"], row["value"], row.get("description", "")],
             )
         logger.info("Seeded %d scoring_config rows", len(config_rows))
+        # Backfill new normalization keys into existing DBs where INSERT OR IGNORE
+        # above is a no-op (the row already exists from an older seed run).
+        for key, value in [
+            ("virality_views_normalization", 1_000_000),
+            ("virality_reposts_normalization", 5_000),
+        ]:
+            self._execute_write(
+                "INSERT OR IGNORE INTO scoring_config (tenant_id, key, value) VALUES (?, ?, ?)",
+                [tenant_id, key, str(value)],
+            )
 
     # ------------------------------------------------------------------
     # Accounts

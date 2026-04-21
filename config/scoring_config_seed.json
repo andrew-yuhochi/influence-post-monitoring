@@ -35,6 +35,16 @@
     "description": "Minimum repost count for ACT_NOW tier classification"
   },
   {
+    "key": "virality_views_normalization",
+    "value": 1000000,
+    "description": "Normalization ceiling for F2a virality absolute score (view count component)"
+  },
+  {
+    "key": "virality_reposts_normalization",
+    "value": 5000,
+    "description": "Normalization ceiling for F2a virality absolute score (repost count component)"
+  },
+  {
     "key": "watch_velocity_floor",
     "value": 1000,
     "description": "Minimum views/hour for WATCH tier classification"

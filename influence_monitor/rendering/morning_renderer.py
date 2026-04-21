@@ -36,6 +36,7 @@ class MorningSignal:
     tier: str                   # "act_now" | "watch"
     post_created_at: datetime   # time the original post was published
     market_cap_class: str = ""  # "Mega" | "Large" | "Mid" | "Small" | "" (not shown)
+    signal_id: int = 0          # DB primary key; 0 means unknown (safe default)
 
 
 def _direction_label(direction: str) -> str:
@@ -58,17 +59,17 @@ def _conviction_display(score: float, direction: str = "LONG") -> str:
     """Return emoji bar + decimal score (filled markers only, no empty markers).
 
     BUY/LONG signals use ✅; SELL/SHORT signals use ❌.
-    Score is stored as 0.0–1.0 in the DB and displayed as a 2-decimal value.
+    Score is stored as 0.0–10.0 in the DB and displayed as a 2-decimal value.
     """
-    if score >= 0.9:
+    if score >= 9.0:
         filled = 5
-    elif score >= 0.7:
+    elif score >= 7.0:
         filled = 4
-    elif score >= 0.5:
+    elif score >= 5.0:
         filled = 3
-    elif score >= 0.3:
+    elif score >= 3.0:
         filled = 2
-    elif score >= 0.1:
+    elif score >= 1.0:
         filled = 1
     else:
         filled = 0
@@ -77,7 +78,7 @@ def _conviction_display(score: float, direction: str = "LONG") -> str:
     return f"{bar} - {score:.2f}"
 
 
-def _truncate_chars(text: str, max_chars: int = 150) -> str:
+def _truncate_chars(text: str, max_chars: int = 80) -> str:
     """Return text truncated to max_chars characters, appending … if cut.
 
     Truncation always happens at a whitespace boundary so words are not split.
@@ -198,7 +199,7 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
         return slot.conviction_score
 
     top_act = sorted(grouped, key=_slot_key, reverse=True)[:5]
-    top_watch = sorted(watch, key=lambda s: s.views_per_hour, reverse=True)[:5]
+    top_watch = sorted(watch, key=lambda s: s.conviction_score, reverse=True)[:5]
 
     # Build ACT NOW section
     act_sections: list[str] = [date_header, ""]
@@ -235,10 +236,10 @@ def render_morning(act_now: list[MorningSignal], watch: list[MorningSignal]) -> 
     msg2 = "\n".join(watch_sections)
     full = msg1 + "\n" + msg2
 
-    if len(full) <= 4000:
+    if len(full) <= 1500:
         return [full]
 
-    logger.info("Morning alert exceeds 4000 chars (%d); splitting into two messages.", len(full))
+    logger.info("Morning alert exceeds 1500 chars (%d); splitting into two messages.", len(full))
     return [msg1, msg2]
 
 

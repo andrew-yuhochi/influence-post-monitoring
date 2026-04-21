@@ -42,6 +42,11 @@ class ScoringInput:
     distinct_same_direction_posters: int = 1   # count of distinct handles on same ticker+direction
     total_distinct_posters_on_ticker: int = 1  # total distinct posters on this ticker (any direction)
     ticker: str = ""
+    # Scaled engagement counts used exclusively for F2a (virality absolute).
+    # When set, f2a uses these instead of raw_post counts.
+    # Tier classification always uses raw_post counts.
+    scaled_views: int | None = None
+    scaled_reposts: int | None = None
 
 
 @dataclass
@@ -90,6 +95,9 @@ class ScoredSignal:
     llm_input_tokens: int | None = None
     llm_output_tokens: int | None = None
 
+    # DB primary key — set after insert_signal(); 0 means not yet persisted
+    signal_id: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Sub-score helpers
@@ -98,6 +106,7 @@ class ScoredSignal:
 def _compute_f2a(views: int | None, reposts: int | None, threshold_views: float, threshold_reposts: float) -> float:
     """F2a — virality absolute: linear ramp to 1.0, capped.
 
+    Normalises by ``threshold_views`` / ``threshold_reposts``.
     Uses whichever metric gives the higher score.
     """
     score_v = min((views or 0) / threshold_views, 1.0) if threshold_views > 0 else 0.0
@@ -302,7 +311,9 @@ class ScoringEngine:
         # Pre-compute views_per_hour for every input
         vph_map: dict[int, float | None] = {
             id(inp): _compute_views_per_hour(
-                inp.raw_post.view_count, inp.posted_at, inp.collection_window_start
+                inp.scaled_views if inp.scaled_views is not None else inp.raw_post.view_count,
+                inp.posted_at,
+                inp.collection_window_start,
             )
             for inp in inputs
         }
@@ -352,7 +363,10 @@ class ScoringEngine:
             f1 = min(max(inp.account_credibility / 10.0, 0.0), 1.0)
 
             # F2a — virality absolute (0–1)
-            f2a = _compute_f2a(views, reposts, self._views_threshold, self._reposts_threshold)
+            # Use scaled counts when provided (e.g. validate mode); tier classifier always uses raw views/reposts.
+            f2a_views = inp.scaled_views if inp.scaled_views is not None else views
+            f2a_reposts = inp.scaled_reposts if inp.scaled_reposts is not None else reposts
+            f2a = _compute_f2a(f2a_views, f2a_reposts, self._views_threshold, self._reposts_threshold)
 
             # F3 — consensus (0–1)
             f3 = _compute_f3(

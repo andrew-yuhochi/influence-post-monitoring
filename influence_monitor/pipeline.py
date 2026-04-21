@@ -406,6 +406,7 @@ class PipelineOrchestrator:
         since_override: datetime | None = None,
         max_pages: int = 1,
         suppress_delivery: bool = False,
+        views_daily_scale: float = 1.0,
     ) -> None:
         """Execute the 13-step morning alert pipeline.
 
@@ -667,6 +668,13 @@ class PipelineOrchestrator:
                         logger.warning("MarketCapResolver failed for %s: %s", t.ticker, exc)
                         cap_class = "Micro"
 
+                    # Scaled counts for F2a only — tier classifier always uses raw post counts.
+                    scaled_views: int | None = None
+                    scaled_reposts: int | None = None
+                    if views_daily_scale != 1.0:
+                        scaled_views = int((post.view_count or 0) * views_daily_scale)
+                        scaled_reposts = int((post.repost_count or 0) * views_daily_scale)
+
                     inp = ScoringInput(
                         post_score=ps,
                         raw_post=post,
@@ -677,6 +685,8 @@ class PipelineOrchestrator:
                         distinct_same_direction_posters=same_dir_count,
                         total_distinct_posters_on_ticker=total_distinct,
                         ticker=t.ticker,
+                        scaled_views=scaled_views,
+                        scaled_reposts=scaled_reposts,
                     )
                     scoring_inputs.append(inp)
 
@@ -795,7 +805,7 @@ class PipelineOrchestrator:
                         cap_class = "Micro"
                         liq_mod = 1.3
 
-                    self._repo.insert_signal(
+                    inserted_id = self._repo.insert_signal(
                         tenant_id=1,
                         user_id=1,
                         post_id=db_post_id,
@@ -831,6 +841,8 @@ class PipelineOrchestrator:
                         engagement_reposts=signal.engagement_reposts,
                         views_per_hour=signal.views_per_hour,
                     )
+                    if inserted_id:
+                        signal.signal_id = inserted_id
 
             signals_scored = len(scored_signals)
             signals_act_now = len(act_now_signals_raw)
@@ -869,7 +881,7 @@ class PipelineOrchestrator:
                         strategy=acc.get("angle") or "investor",
                     )],
                     direction=signal.direction,
-                    conviction_score=signal.final_score,
+                    conviction_score=signal.conviction_score,
                     summary=signal.key_claim or signal.rationale or "",
                     views_per_hour=signal.views_per_hour or 0.0,
                     corroboration_count=signal.distinct_same_direction_posters
@@ -879,9 +891,10 @@ class PipelineOrchestrator:
                     tier="act_now",
                     post_created_at=posted_at,
                     market_cap_class=cap_class,
+                    signal_id=signal.signal_id,
                 ))
 
-            for signal in sorted(watch_signals_raw, key=lambda s: s.views_per_hour or 0.0, reverse=True)[:5]:
+            for signal in sorted(watch_signals_raw, key=lambda s: s.final_score, reverse=True)[:5]:
                 acc = accounts_by_handle.get(signal.account_handle.lower(), {})
                 try:
                     cap_class, _ = self._market_cap_resolver.resolve(signal.ticker)
@@ -899,7 +912,7 @@ class PipelineOrchestrator:
                         strategy=acc.get("angle") or "investor",
                     )],
                     direction=signal.direction,
-                    conviction_score=signal.final_score,
+                    conviction_score=signal.conviction_score,
                     summary=signal.key_claim or signal.rationale or "",
                     views_per_hour=signal.views_per_hour or 0.0,
                     corroboration_count=1,
@@ -908,20 +921,13 @@ class PipelineOrchestrator:
                     tier="watch",
                     post_created_at=posted_at,
                     market_cap_class=cap_class,
+                    signal_id=signal.signal_id,
                 ))
 
             messages = render_morning(act_now_morning, watch_morning)
             logger.info(
                 "STEP 11 DONE — %d message parts rendered", len(messages)
             )
-
-            # Collect (ticker, handle) pairs for signals that were rendered so the
-            # evening pipeline can do a 1-to-1 morning→evening mapping.
-            rendered_tickers_handles: set[tuple[str, str]] = set()
-            for sig in act_now_morning + watch_morning:
-                rendered_tickers_handles.add(
-                    (sig.ticker.upper(), sig.posters[0].handle.lower())
-                )
 
             # ------------------------------------------------------------------
             # STEP 12 — Send via WhatsApp delivery chain
@@ -931,22 +937,20 @@ class PipelineOrchestrator:
                 self._deliver(msg, kind="morning", dry_run=dry_run or suppress_delivery)
             logger.info("STEP 12 DONE — delivery complete")
 
-            # Mark the rendered signals in DB so the evening pipeline sees only them.
-            if not dry_run and rendered_tickers_handles:
-                all_today = self._repo.get_signals_for_date(run_date, tenant_id=1)
-                shown_ids = [
-                    row["id"] for row in all_today
-                    if (
-                        row["ticker"].upper(),
-                        (row.get("account_handle") or "").lower(),
-                    ) in rendered_tickers_handles
-                ]
-                if shown_ids:
-                    self._repo.mark_signals_shown_in_morning(shown_ids)
-                    logger.info(
-                        "STEP 12 — marked %d signal(s) as shown_in_morning_alert",
-                        len(shown_ids),
-                    )
+            # Mark exactly the rendered signals in DB so the evening pipeline sees only them.
+            # Use signal_id directly — avoids over-marking duplicates when multiple posts
+            # share the same (ticker, handle) pair (e.g. during multi-day validate runs).
+            shown_ids = [
+                sig.signal_id
+                for sig in act_now_morning + watch_morning
+                if sig.signal_id
+            ]
+            if not dry_run and shown_ids:
+                self._repo.mark_signals_shown_in_morning(shown_ids)
+                logger.info(
+                    "STEP 12 — marked %d signal(s) as shown_in_morning_alert",
+                    len(shown_ids),
+                )
 
             # ------------------------------------------------------------------
             # STEP 13 — Write daily_summaries and messages_sent
@@ -1402,7 +1406,7 @@ class PipelineOrchestrator:
     # run_validate — one-shot end-to-end validation tool
     # ------------------------------------------------------------------
 
-    def run_validate(self, days_back: int = 60, dry_run: bool = False) -> None:
+    def run_validate(self, days_back: int = 60, dry_run: bool = False, target_date: date | None = None) -> None:
         """Fetch N days of real posts, re-timestamp them to simulate overnight,
         then run the full morning alert + evening summary pipeline end-to-end.
 
@@ -1417,16 +1421,22 @@ class PipelineOrchestrator:
             When True, delete all data inserted during this run after both
             pipelines complete, restoring the DB to its pre-run state.
             When False (default), keep the inserted data.
+        target_date:
+            Simulate running on this date instead of today. When provided,
+            ``since`` is anchored to midnight UTC of that date minus days_back.
         """
-        run_date = date.today()
-        since = datetime.now(tz=timezone.utc) - timedelta(days=days_back)
+        run_date = target_date if target_date is not None else date.today()
+        if target_date is not None:
+            since = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc) - timedelta(days=days_back)
+        else:
+            since = datetime.now(tz=timezone.utc) - timedelta(days=days_back)
 
         # Record start time for cleanup timestamp filtering.
         run_start = datetime.now(tz=timezone.utc)
 
         logger.info(
-            "run_validate START — days_back=%d since=%s dry_run=%s run_start=%s",
-            days_back, since.isoformat(), dry_run, run_start.isoformat(),
+            "run_validate START — run_date=%s days_back=%d since=%s dry_run=%s run_start=%s",
+            run_date.isoformat(), days_back, since.isoformat(), dry_run, run_start.isoformat(),
         )
 
         try:
@@ -1438,6 +1448,7 @@ class PipelineOrchestrator:
                 dry_run=False,
                 since_override=since,
                 max_pages=3,
+                views_daily_scale=1.0 / days_back,
             )
 
             # Evening pipeline — real DB writes, real WhatsApp delivery.
@@ -1581,6 +1592,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run everything (fetch, score, DB writes, WhatsApp delivery) then delete all inserted data — DB is restored to pre-run state.",
     )
+    validate_parser.add_argument(
+        "--date",
+        default=None,
+        help="Simulate running on this date (YYYY-MM-DD). Defaults to today.",
+    )
 
     return parser
 
@@ -1643,6 +1659,7 @@ def main() -> None:
             orchestrator.run_validate(
                 days_back=getattr(args, "days_back", 60),
                 dry_run=args.dry_run,
+                target_date=date.fromisoformat(args.date) if getattr(args, "date", None) else None,
             )
         else:
             logger.error("Unknown command: %s", args.command)
