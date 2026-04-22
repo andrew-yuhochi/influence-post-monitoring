@@ -385,6 +385,71 @@ class TestAccountRegistry:
     # Test 7: debounce — skip resolution when within retry_rest_minutes window
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Test 8: mass-failure guard — skip resolution when ≥50% of primaries
+    # are at failure threshold (systemic auth/network issue, not individual
+    # account suspensions). Only fires when there are ≥3 primaries.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_mass_failure_guard_skips_resolution(self):
+        """When ≥50% of primaries hit the threshold, skip resolution entirely."""
+        past_failure = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+        # 3 primaries, all at the failure threshold (100% >= 50% → guard fires)
+        primaries = [
+            {
+                "id": i,
+                "handle": f"Handle{i}",
+                "display_name": f"Investor {i}",
+                "consecutive_failures": 3,
+                "last_failure_at": past_failure,
+                "follower_count_at_post": 100_000,
+                "status": "primary",
+                "angle": "Macro",
+                "credibility_score": 7.0,
+                "notes": "",
+            }
+            for i in range(1, 4)
+        ]
+
+        source = _make_source(search_results=[])
+        repo = _make_repo(primaries)
+        registry = AccountRegistry(repo, source)
+
+        await registry.validate_and_promote()
+
+        # Resolution sequence must not run — search_user never called
+        source.search_user.assert_not_called()
+        # No account marked inactive or promoted
+        repo.upsert_account.assert_not_called()
+        repo.rename_account_handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mass_failure_guard_does_not_fire_for_small_account_list(self):
+        """Mass-failure guard is inactive when fewer than 3 primaries exist (single-account case)."""
+        past_failure = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+        # Only 1 primary at threshold — guard should NOT fire (< 3 accounts)
+        primary = self._make_primary(
+            handle="LoneHandle",
+            display_name="Solo Investor",
+            consecutive_failures=3,
+            last_failure_at=past_failure,
+        )
+
+        source = _make_source(search_results=[])  # search returns empty → backup promotion path
+        backup = self._make_backup("BackupHandle", backup_rank=1)
+        repo = _make_repo([primary], backups=[backup])
+        registry = AccountRegistry(repo, source)
+
+        await registry.validate_and_promote()
+
+        # Resolution DID run — guard did not suppress it
+        source.search_user.assert_called()
+
+
+
     @pytest.mark.asyncio
     async def test_debounce_skips_resolution_within_window(self):
         """Account with failures at threshold but recent failure → skips resolution."""

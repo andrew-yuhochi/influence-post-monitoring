@@ -165,10 +165,37 @@ class AccountRegistry:
         consecutive_failures >= max_consecutive_failures and the debounce
         window has elapsed, runs the five-step resolution sequence.
 
+        Mass-failure guard: if more than 50% of primaries are at or above the
+        failure threshold simultaneously, this almost certainly indicates a
+        systemic auth/network failure rather than individual account suspensions.
+        In that case the resolution sequence is skipped entirely to prevent a
+        cascade that marks all accounts inactive.
+
         Returns the refreshed list of active primary accounts.
         """
         primaries = self._repo.get_accounts_by_status("primary", self._tenant_id)
         max_failures = self._max_consecutive_failures()
+
+        # Mass-failure guard: skip resolution when >= 50% of primaries are failing,
+        # but only when there are at least 3 primaries (to avoid false-positives in
+        # small test / single-account scenarios).
+        # Individual account resolution (404/suspended) should affect a small fraction
+        # of accounts at a time. A majority failing simultaneously signals a systemic
+        # issue (expired session, X.com outage) — not account-level problems.
+        _MASS_FAILURE_MIN_ACCOUNTS = 3
+        if len(primaries) >= _MASS_FAILURE_MIN_ACCOUNTS:
+            failing_count = sum(
+                1 for a in primaries
+                if int(a.get("consecutive_failures") or 0) >= max_failures
+            )
+            failure_ratio = failing_count / len(primaries)
+            if failure_ratio >= 0.5:
+                logger.warning(
+                    "Mass-failure guard triggered: %d/%d primaries at failure threshold "
+                    "(%.0f%%). Skipping resolution sequence — likely systemic auth/network issue.",
+                    failing_count, len(primaries), failure_ratio * 100,
+                )
+                return primaries
 
         for account in primaries:
             failures = int(account.get("consecutive_failures") or 0)
