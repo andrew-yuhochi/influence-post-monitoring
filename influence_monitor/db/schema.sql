@@ -241,3 +241,27 @@ CREATE TABLE IF NOT EXISTS api_usage (
     status        TEXT,
     error_message TEXT
 );
+
+-- Diagnostic table — tracks each post's journey through the pipeline.
+-- A new row is written at each stage so we can pinpoint where posts drop off
+-- (e.g. 1136 posts ingested but 0 signals written → examine stage distribution).
+-- One row per (post_id, pipeline_stage) per run — no deduplication between runs.
+CREATE TABLE IF NOT EXISTS post_scoring_log (
+    id                    INTEGER PRIMARY KEY,
+    user_id               TEXT,
+    tenant_id             TEXT,
+    post_id               TEXT,                  -- posts.external_id or posts.id
+    account_handle        TEXT,                  -- human-readable, for easy querying
+    posted_at             TEXT,
+    fetched_at            TEXT,
+    post_text             TEXT,                  -- first 500 chars
+    tickers_extracted     TEXT,                  -- JSON array e.g. '["AAPL","MSFT"]', null if extraction failed/skipped
+    extraction_confidence REAL,
+    direction             TEXT,                  -- BULLISH/BEARISH/NEUTRAL/null
+    argument_quality      TEXT,                  -- HIGH/MEDIUM/LOW/null
+    conviction_score      REAL,                  -- null if scoring not reached
+    tier                  TEXT,                  -- ACT_NOW/WATCH/NO_SIGNAL/null
+    pipeline_stage        TEXT NOT NULL,         -- ingested / extracted / scored / delivered / failed
+    error_message         TEXT,                  -- populated if pipeline_stage = 'failed'
+    processed_at          TEXT NOT NULL          -- ISO timestamp when this row was written
+);

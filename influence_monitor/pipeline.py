@@ -555,6 +555,22 @@ class PipelineOrchestrator:
                 len(all_posts), success_count, len(active_accounts), failure_count,
             )
 
+            # Diagnostic: log every ingested post so we can see how many reach
+            # each subsequent stage versus how many posts were fetched.
+            if not dry_run:
+                for post in all_posts:
+                    try:
+                        self._repo.log_post_scoring(
+                            post_id=post.external_id,
+                            pipeline_stage="ingested",
+                            account_handle=post.author_handle,
+                            posted_at=post.posted_at.isoformat() if post.posted_at else None,
+                            fetched_at=post.fetched_at.isoformat() if post.fetched_at else None,
+                            post_text=post.text,
+                        )
+                    except Exception as _log_exc:  # noqa: BLE001
+                        logger.debug("post_scoring_log ingested write failed: %s", _log_exc)
+
             # Validate mode: re-timestamp all posts to simulate overnight posts today.
             # Spreads them uniformly across yesterday 20:00 UTC → today 07:00 UTC.
             if since_override is not None and all_posts:
@@ -594,11 +610,49 @@ class PipelineOrchestrator:
                         "Ticker extraction failed for post %s: %s", post.external_id, exc
                     )
                     post_tickers[post.external_id] = []
+                    if not dry_run:
+                        try:
+                            self._repo.log_post_scoring(
+                                post_id=post.external_id,
+                                pipeline_stage="failed",
+                                account_handle=post.author_handle,
+                                posted_at=post.posted_at.isoformat() if post.posted_at else None,
+                                fetched_at=post.fetched_at.isoformat() if post.fetched_at else None,
+                                post_text=post.text,
+                                error_message=f"TickerExtractor: {type(exc).__name__}: {str(exc)[:200]}",
+                            )
+                        except Exception as _log_exc:  # noqa: BLE001
+                            logger.debug("post_scoring_log failed write error: %s", _log_exc)
 
             logger.info(
                 "STEP 4 DONE — extracted tickers from %d posts",
                 sum(1 for t in post_tickers.values() if t),
             )
+
+            # Diagnostic: log extraction results per post.
+            if not dry_run:
+                for post in all_posts:
+                    tickers = post_tickers.get(post.external_id, [])
+                    ticker_syms = [t.ticker for t in tickers]
+                    # Derive a single representative confidence (highest priority).
+                    conf_order = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+                    best_conf: float | None = None
+                    if tickers:
+                        best = max(tickers, key=lambda t: conf_order.get(t.confidence, 0))
+                        best_conf = float(conf_order.get(best.confidence, 1))
+                    try:
+                        self._repo.log_post_scoring(
+                            post_id=post.external_id,
+                            pipeline_stage="extracted",
+                            account_handle=post.author_handle,
+                            posted_at=post.posted_at.isoformat() if post.posted_at else None,
+                            fetched_at=post.fetched_at.isoformat() if post.fetched_at else None,
+                            post_text=post.text,
+                            tickers_extracted=ticker_syms if ticker_syms else None,
+                            extraction_confidence=best_conf,
+                        )
+                    except Exception as _log_exc:  # noqa: BLE001
+                        logger.debug("post_scoring_log extracted write failed: %s", _log_exc)
 
             # ------------------------------------------------------------------
             # STEP 5 — Claude-score each post
@@ -617,6 +671,20 @@ class PipelineOrchestrator:
                     logger.warning(
                         "LLM scoring failed for post %s: %s", post.external_id, exc
                     )
+                    if not dry_run:
+                        try:
+                            self._repo.log_post_scoring(
+                                post_id=post.external_id,
+                                pipeline_stage="failed",
+                                account_handle=post.author_handle,
+                                posted_at=post.posted_at.isoformat() if post.posted_at else None,
+                                fetched_at=post.fetched_at.isoformat() if post.fetched_at else None,
+                                post_text=post.text,
+                                tickers_extracted=[t.ticker for t in tickers],
+                                error_message=f"LLMClient: {type(exc).__name__}: {str(exc)[:200]}",
+                            )
+                        except Exception as _log_exc:  # noqa: BLE001
+                            logger.debug("post_scoring_log failed write error: %s", _log_exc)
 
             logger.info("STEP 5 DONE — scored %d posts", len(post_scores))
 
@@ -692,6 +760,37 @@ class PipelineOrchestrator:
 
             scored_signals = self._scoring_engine.score(scoring_inputs)
             logger.info("STEP 6 DONE — %d scored signals", len(scored_signals))
+
+            # Diagnostic: log one row per scored signal so we know which posts
+            # made it through extraction + LLM scoring and what tier they received.
+            if not dry_run:
+                for signal in scored_signals:
+                    # Find the original post that produced this signal.
+                    matching_post_for_log: RawPost | None = None
+                    for post in all_posts:
+                        if (
+                            post.author_handle.lower() == signal.account_handle.lower()
+                            and signal.ticker in [t.ticker for t in post_tickers.get(post.external_id, [])]
+                        ):
+                            matching_post_for_log = post
+                            break
+                    post_ext_id = matching_post_for_log.external_id if matching_post_for_log else signal.account_handle
+                    try:
+                        self._repo.log_post_scoring(
+                            post_id=post_ext_id,
+                            pipeline_stage="scored",
+                            account_handle=signal.account_handle,
+                            posted_at=matching_post_for_log.posted_at.isoformat() if matching_post_for_log and matching_post_for_log.posted_at else None,
+                            fetched_at=matching_post_for_log.fetched_at.isoformat() if matching_post_for_log and matching_post_for_log.fetched_at else None,
+                            post_text=matching_post_for_log.text if matching_post_for_log else None,
+                            tickers_extracted=[signal.ticker],
+                            direction=signal.direction,
+                            argument_quality=signal.argument_quality,
+                            conviction_score=signal.conviction_score,
+                            tier=signal.tier,
+                        )
+                    except Exception as _log_exc:  # noqa: BLE001
+                        logger.debug("post_scoring_log scored write failed: %s", _log_exc)
 
             # ------------------------------------------------------------------
             # STEP 7 — ConflictResolver (already applied inside ScoringEngine.score)

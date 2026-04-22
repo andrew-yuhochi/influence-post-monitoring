@@ -864,6 +864,59 @@ class SignalRepository:
         )
 
     # ------------------------------------------------------------------
+    # Post scoring log (diagnostic)
+    # ------------------------------------------------------------------
+
+    def log_post_scoring(
+        self,
+        post_id: str,
+        pipeline_stage: str,
+        account_handle: str | None = None,
+        posted_at: str | None = None,
+        fetched_at: str | None = None,
+        post_text: str | None = None,
+        tickers_extracted: list[str] | None = None,
+        extraction_confidence: float | None = None,
+        direction: str | None = None,
+        argument_quality: str | None = None,
+        conviction_score: float | None = None,
+        tier: str | None = None,
+        error_message: str | None = None,
+        user_id: str = "1",
+        tenant_id: str = "1",
+    ) -> int | None:
+        """Write a diagnostic row to post_scoring_log.
+
+        Call once per stage a post reaches:
+          - pipeline_stage='ingested'  after a post is stored in the posts table
+          - pipeline_stage='extracted' after TickerExtractor runs
+          - pipeline_stage='scored'    after LLM + ScoringEngine run
+          - pipeline_stage='failed'    when an exception aborts a stage for this post
+
+        A new row per call; no deduplication between runs.
+        """
+        processed_at = datetime.now(tz=timezone.utc).isoformat()
+        tickers_json: str | None = None
+        if tickers_extracted is not None:
+            tickers_json = json.dumps(tickers_extracted)
+        # Truncate post_text to first 500 chars to keep the log table lightweight.
+        text_snippet = post_text[:500] if post_text else None
+        return self._execute_write(
+            """INSERT INTO post_scoring_log
+               (user_id, tenant_id, post_id, account_handle, posted_at, fetched_at,
+                post_text, tickers_extracted, extraction_confidence, direction,
+                argument_quality, conviction_score, tier, pipeline_stage,
+                error_message, processed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                user_id, tenant_id, post_id, account_handle, posted_at, fetched_at,
+                text_snippet, tickers_json, extraction_confidence, direction,
+                argument_quality, conviction_score, tier, pipeline_stage,
+                error_message, processed_at,
+            ],
+        )
+
+    # ------------------------------------------------------------------
     # Daily summaries
     # ------------------------------------------------------------------
 
